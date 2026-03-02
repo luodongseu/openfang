@@ -2194,8 +2194,10 @@ pub struct FeishuConfig {
     pub app_id: String,
     /// Env var name holding the app secret.
     pub app_secret_env: String,
-    /// Port for the incoming webhook.
+    /// Port for the incoming webhook (webhook mode only).
     pub webhook_port: u16,
+    /// Connection mode: "webhook" or "websocket".
+    pub mode: String,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2209,6 +2211,7 @@ impl Default for FeishuConfig {
             app_id: String::new(),
             app_secret_env: "FEISHU_APP_SECRET".to_string(),
             webhook_port: 8453,
+            mode: "webhook".to_string(),
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }

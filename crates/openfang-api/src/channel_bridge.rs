@@ -1340,11 +1340,21 @@ pub async fn start_channel_bridge_with_config(
     // Feishu/Lark
     if let Some(ref fs_config) = config.feishu {
         if let Some(secret) = read_token(&fs_config.app_secret_env, "Feishu") {
-            let adapter = Arc::new(FeishuAdapter::new(
-                fs_config.app_id.clone(),
-                secret,
-                fs_config.webhook_port,
-            ));
+            tracing::info!("Feishu config: mode={}, app_id={}", fs_config.mode, fs_config.app_id);
+            let adapter: Arc<dyn ChannelAdapter> = if fs_config.mode == "websocket" {
+                tracing::info!("Creating Feishu adapter in WebSocket mode");
+                Arc::new(FeishuAdapter::new_websocket(
+                    fs_config.app_id.clone(),
+                    secret,
+                ))
+            } else {
+                tracing::info!("Creating Feishu adapter in Webhook mode on port {}", fs_config.webhook_port);
+                Arc::new(FeishuAdapter::new(
+                    fs_config.app_id.clone(),
+                    secret,
+                    fs_config.webhook_port,
+                ))
+            };
             adapters.push((adapter, fs_config.default_agent.clone()));
         }
     }

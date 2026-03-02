@@ -14,12 +14,13 @@ use crate::types::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::{SinkExt, Stream, StreamExt};
+use prost::Message as ProstMessage;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMsg};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
@@ -39,6 +40,9 @@ const MAX_MESSAGE_LEN: usize = 4096;
 /// Token refresh buffer — refresh 5 minutes before actual expiry.
 const TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
 
+/// Heartbeat timeout for WS connection — must be larger than ping_interval (default 120 s).
+const WS_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Feishu connection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeishuConnectionMode {
@@ -46,6 +50,67 @@ pub enum FeishuConnectionMode {
     Webhook,
     /// WebSocket mode: Long connection receives events (no public IP required).
     WebSocket,
+}
+
+/// Feishu WS frame (pbbp2.proto).
+/// method=0 → CONTROL (ping/pong)  method=1 → DATA (events)
+#[derive(Clone, PartialEq, prost::Message)]
+struct PbFrame {
+    #[prost(uint64, tag = "1")]
+    seq_id: u64,
+    #[prost(uint64, tag = "2")]
+    log_id: u64,
+    #[prost(int32, tag = "3")]
+    service: i32,
+    #[prost(int32, tag = "4")]
+    method: i32,
+    #[prost(message, repeated, tag = "5")]
+    headers: Vec<PbHeader>,
+    #[prost(bytes = "vec", optional, tag = "8")]
+    payload: Option<Vec<u8>>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct PbHeader {
+    #[prost(string, tag = "1")]
+    key: String,
+    #[prost(string, tag = "2")]
+    value: String,
+}
+
+impl PbFrame {
+    fn header_value(&self, key: &str) -> &str {
+        self.headers
+            .iter()
+            .find(|h| h.key == key)
+            .map(|h| h.value.as_str())
+            .unwrap_or("")
+    }
+}
+
+/// Server-sent client config (parsed from pong payload)
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+struct WsClientConfig {
+    #[serde(rename = "PingInterval")]
+    ping_interval: Option<u64>,
+}
+
+/// POST /callback/ws/endpoint response
+#[derive(Debug, serde::Deserialize)]
+struct WsEndpointResp {
+    code: i32,
+    #[serde(default)]
+    msg: Option<String>,
+    #[serde(default)]
+    data: Option<WsEndpoint>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WsEndpoint {
+    #[serde(rename = "URL")]
+    url: String,
+    #[serde(rename = "ClientConfig")]
+    client_config: Option<WsClientConfig>,
 }
 
 /// Feishu/Lark Open Platform adapter.
@@ -443,61 +508,208 @@ impl FeishuAdapter {
         adapter: Arc<FeishuAdapterClone>,
         tx: mpsc::Sender<ChannelMessage>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let ws_url = adapter.get_websocket_endpoint().await?;
+        let (ws_url, client_config) = adapter.get_websocket_endpoint().await?;
+        
+        // Extract service_id from URL query params
+        let service_id = ws_url
+            .split('?')
+            .nth(1)
+            .and_then(|qs| {
+                qs.split('&')
+                    .find(|kv| kv.starts_with("service_id="))
+                    .and_then(|kv| kv.split('=').nth(1))
+                    .and_then(|v| v.parse::<i32>().ok())
+            })
+            .unwrap_or(0);
+        
         info!("Connecting to Feishu WebSocket endpoint: {ws_url}");
 
-        let (ws_stream, _) = connect_async(ws_url).await?;
-        info!("Feishu WebSocket connected successfully");
+        let (ws_stream, _) = connect_async(&ws_url).await?;
+        info!("Feishu WebSocket connected successfully (service_id={service_id})");
 
         let (mut write, mut read) = ws_stream.split();
         let mut shutdown_rx = adapter.shutdown_rx.clone();
 
+        // Setup heartbeat
+        let mut ping_secs = client_config.ping_interval.unwrap_or(120).max(10);
+        let mut hb_interval = tokio::time::interval(Duration::from_secs(ping_secs));
+        let mut timeout_check = tokio::time::interval(Duration::from_secs(10));
+        hb_interval.tick().await; // consume immediate tick
+
+        let mut seq: u64 = 0;
+        let mut last_recv = Instant::now();
+
+        // Send initial ping immediately
+        seq = seq.wrapping_add(1);
+        let initial_ping = PbFrame {
+            seq_id: seq,
+            log_id: 0,
+            service: service_id,
+            method: 0,
+            headers: vec![PbHeader {
+                key: "type".into(),
+                value: "ping".into(),
+            }],
+            payload: None,
+        };
+        if write.send(WsMsg::Binary(initial_ping.encode_to_vec())).await.is_err() {
+            return Err("Feishu WebSocket initial ping failed".into());
+        }
+
+        // Fragment cache for multi-part messages
+        type FragEntry = (Vec<Option<Vec<u8>>>, Instant);
+        let mut frag_cache: HashMap<String, FragEntry> = HashMap::new();
+
         loop {
             tokio::select! {
+                biased;
+
+                _ = hb_interval.tick() => {
+                    seq = seq.wrapping_add(1);
+                    let ping = PbFrame {
+                        seq_id: seq,
+                        log_id: 0,
+                        service: service_id,
+                        method: 0,
+                        headers: vec![PbHeader {
+                            key: "type".into(),
+                            value: "ping".into(),
+                        }],
+                        payload: None,
+                    };
+                    if write.send(WsMsg::Binary(ping.encode_to_vec())).await.is_err() {
+                        warn!("Feishu WebSocket ping failed, reconnecting");
+                        break;
+                    }
+                    // GC stale fragments > 5 min
+                    let cutoff = Instant::now().checked_sub(Duration::from_secs(300)).unwrap_or(Instant::now());
+                    frag_cache.retain(|_, (_, ts)| *ts > cutoff);
+                }
+
+                _ = timeout_check.tick() => {
+                    if last_recv.elapsed() > WS_HEARTBEAT_TIMEOUT {
+                        warn!("Feishu WebSocket heartbeat timeout, reconnecting");
+                        break;
+                    }
+                }
+
                 msg = read.next() => {
-                    match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            debug!("Received Feishu WebSocket message: {text}");
-                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) {
-                                if let Some(msg) = parse_feishu_event(&event) {
-                                    let _ = tx.send(msg).await;
+                    let raw = match msg {
+                        Some(Ok(ws_msg)) => {
+                            match ws_msg {
+                                WsMsg::Binary(b) => {
+                                    last_recv = Instant::now();
+                                    b
                                 }
-                            }
-                        }
-                        Some(Ok(Message::Binary(data))) => {
-                            debug!("Received Feishu WebSocket binary message: {} bytes", data.len());
-                            if let Ok(text) = String::from_utf8(data) {
-                                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) {
-                                    if let Some(msg) = parse_feishu_event(&event) {
-                                        let _ = tx.send(msg).await;
-                                    }
+                                WsMsg::Ping(d) => {
+                                    let _ = write.send(WsMsg::Pong(d)).await;
+                                    continue;
                                 }
+                                WsMsg::Close(_) => {
+                                    info!("Feishu WebSocket closed by server");
+                                    break;
+                                }
+                                _ => continue,
                             }
-                        }
-                        Some(Ok(Message::Close(_))) => {
-                            info!("Feishu WebSocket connection closed by server");
-                            break;
-                        }
-                        Some(Ok(Message::Ping(_))) => {
-                            debug!("Received Feishu WebSocket ping, sending pong");
-                            let _ = write.send(Message::Pong(Vec::new())).await;
-                        }
-                        Some(Ok(Message::Pong(_))) => {
-                            debug!("Received Feishu WebSocket pong");
-                        }
-                        Some(Ok(_)) => {
-                            debug!("Received unhandled Feishu WebSocket message type");
-                        }
-                        Some(Err(e)) => {
-                            error!("Feishu WebSocket error: {e}");
-                            break;
                         }
                         None => {
                             info!("Feishu WebSocket stream ended");
                             break;
                         }
+                        Some(Err(e)) => {
+                            error!("Feishu WebSocket read error: {e}");
+                            break;
+                        }
+                    };
+
+                    // Decode protobuf frame
+                    let frame = match PbFrame::decode(&raw[..]) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            error!("Feishu WebSocket proto decode error: {e}");
+                            continue;
+                        }
+                    };
+
+                    // CONTROL frame (method=0)
+                    if frame.method == 0 {
+                        if frame.header_value("type") == "pong" {
+                            if let Some(p) = &frame.payload {
+                                if let Ok(cfg) = serde_json::from_slice::<WsClientConfig>(p) {
+                                    if let Some(secs) = cfg.ping_interval {
+                                        let secs = secs.max(10);
+                                        if secs != ping_secs {
+                                            ping_secs = secs;
+                                            hb_interval = tokio::time::interval(Duration::from_secs(ping_secs));
+                                            info!("Feishu WebSocket ping_interval updated to {ping_secs}s");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // DATA frame (method=1)
+                    let msg_type = frame.header_value("type").to_string();
+                    let msg_id = frame.header_value("message_id").to_string();
+                    let sum = frame.header_value("sum").parse::<usize>().unwrap_or(1);
+                    let seq_num = frame.header_value("seq").parse::<usize>().unwrap_or(0);
+
+                    // ACK immediately (Feishu requires within 3s)
+                    {
+                        let mut ack = frame.clone();
+                        ack.payload = Some(br#"{"code":200,"headers":{},"data":[]}"#.to_vec());
+                        ack.headers.push(PbHeader {
+                            key: "biz_rt".into(),
+                            value: "0".into(),
+                        });
+                        let _ = write.send(WsMsg::Binary(ack.encode_to_vec())).await;
+                    }
+
+                    // Fragment reassembly
+                    let sum = if sum == 0 { 1 } else { sum };
+                    let payload: Vec<u8> = if sum == 1 || msg_id.is_empty() || seq_num >= sum {
+                        frame.payload.clone().unwrap_or_default()
+                    } else {
+                        let entry = frag_cache.entry(msg_id.clone())
+                            .or_insert_with(|| (vec![None; sum], Instant::now()));
+                        if entry.0.len() != sum {
+                            *entry = (vec![None; sum], Instant::now());
+                        }
+                        entry.0[seq_num] = frame.payload.clone();
+                        if entry.0.iter().all(|s| s.is_some()) {
+                            let full: Vec<u8> = entry.0.iter()
+                                .flat_map(|s| s.as_deref().unwrap_or(&[]))
+                                .copied()
+                                .collect();
+                            frag_cache.remove(&msg_id);
+                            full
+                        } else {
+                            continue;
+                        }
+                    };
+
+                    if msg_type != "event" {
+                        continue;
+                    }
+
+                    // Parse event JSON
+                    let event: serde_json::Value = match serde_json::from_slice(&payload) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            error!("Feishu WebSocket event JSON parse error: {e}");
+                            continue;
+                        }
+                    };
+
+                    if let Some(channel_msg) = parse_feishu_event(&event) {
+                        if tx.send(channel_msg).await.is_err() {
+                            break;
+                        }
                     }
                 }
+
                 _ = shutdown_rx.changed() => {
                     info!("Feishu WebSocket shutting down");
                     let _ = write.close().await;
@@ -570,14 +782,17 @@ impl FeishuAdapterClone {
     }
 
     /// Get WebSocket endpoint from Feishu API.
-    async fn get_websocket_endpoint(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let token = self.get_token().await?;
-        let url = "https://open.feishu.cn/open-apis/ws/v1/endpoint";
+    async fn get_websocket_endpoint(&self) -> Result<(String, WsClientConfig), Box<dyn std::error::Error>> {
+        let url = "https://open.feishu.cn/callback/ws/endpoint";
         
         let resp = self
             .client
-            .get(url)
-            .bearer_auth(&token)
+            .post(url)
+            .header("locale", "zh")
+            .json(&serde_json::json!({
+                "AppID": self.app_id,
+                "AppSecret": self.app_secret.as_str(),
+            }))
             .send()
             .await?;
 
@@ -587,19 +802,17 @@ impl FeishuAdapterClone {
             return Err(format!("Feishu WebSocket endpoint request failed {status}: {resp_body}").into());
         }
 
-        let resp_body: serde_json::Value = resp.json().await?;
-        let code = resp_body["code"].as_i64().unwrap_or(-1);
-        if code != 0 {
-            let msg = resp_body["msg"].as_str().unwrap_or("unknown error");
+        let resp_body: WsEndpointResp = resp.json().await?;
+        if resp_body.code != 0 {
+            let msg = resp_body.msg.as_deref().unwrap_or("unknown error");
             return Err(format!("Feishu WebSocket endpoint error: {msg}").into());
         }
 
-        let ws_url = resp_body["data"]["url"]
-            .as_str()
-            .ok_or("Missing WebSocket URL in response")?
-            .to_string();
-
-        Ok(ws_url)
+        let ep = resp_body
+            .data
+            .ok_or("Missing WebSocket endpoint data")?;
+        
+        Ok((ep.url, ep.client_config.unwrap_or_default()))
     }
 }
 

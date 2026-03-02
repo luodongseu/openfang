@@ -9,7 +9,7 @@ use openfang_types::model_catalog::{
     GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL,
     LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL,
     OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
-    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL,
+    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, SOPHON_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL,
     ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
 };
 use std::collections::HashMap;
@@ -458,6 +458,15 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             display_name: "Baidu Qianfan".into(),
             api_key_env: "QIANFAN_API_KEY".into(),
             base_url: QIANFAN_BASE_URL.into(),
+            key_required: true,
+            auth_status: AuthStatus::Missing,
+            model_count: 0,
+        },
+        ProviderInfo {
+            id: "sophon".into(),
+            display_name: "Sophon AI".into(),
+            api_key_env: "SOPHON_API_KEY".into(),
+            base_url: SOPHON_BASE_URL.into(),
             key_required: true,
             auth_status: AuthStatus::Missing,
             model_count: 0,
@@ -2581,6 +2590,23 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_streaming: true,
             aliases: vec![],
         },
+        // ══════════════════════════════════════════════════════════════
+        // Sophon AI (1)
+        // ══════════════════════════════════════════════════════════════
+        ModelCatalogEntry {
+            id: "Kimi-K2.5-260127".into(),
+            display_name: "Kimi K2.5 260127".into(),
+            provider: "sophon".into(),
+            tier: ModelTier::Smart,
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["kimi-sophon".into()],
+        },
     ]
 }
 
@@ -2597,7 +2623,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 28);
+        assert_eq!(catalog.list_providers().len(), 29);
     }
 
     #[test]
@@ -2740,6 +2766,7 @@ mod tests {
         assert!(catalog.get_provider("huggingface").is_some());
         assert!(catalog.get_provider("xai").is_some());
         assert!(catalog.get_provider("replicate").is_some());
+        assert!(catalog.get_provider("sophon").is_some());
     }
 
     #[test]
@@ -2821,6 +2848,15 @@ mod tests {
         assert!(catalog.get_provider("moonshot").is_some());
         assert!(catalog.get_provider("qianfan").is_some());
         assert!(catalog.get_provider("bedrock").is_some());
+        assert!(catalog.get_provider("sophon").is_some());
+    }
+
+    #[test]
+    fn test_sophon_models() {
+        let catalog = ModelCatalog::new();
+        let sophon = catalog.models_by_provider("sophon");
+        assert_eq!(sophon.len(), 1);
+        assert!(sophon.iter().any(|m| m.id == "Kimi-K2.5-260127"));
     }
 
     #[test]

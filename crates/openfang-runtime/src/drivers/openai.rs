@@ -27,6 +27,11 @@ impl OpenAIDriver {
             client: reqwest::Client::new(),
         }
     }
+
+    /// Check if this is a Sophon AI endpoint.
+    fn is_sophon(&self) -> bool {
+        self.base_url.contains("sophon-ai.bytedance.net")
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -288,7 +293,12 @@ impl LlmDriver for OpenAIDriver {
 
         let max_retries = 3;
         for attempt in 0..=max_retries {
-            let url = format!("{}/chat/completions", self.base_url);
+            // Sophon AI uses a different endpoint path
+            let url = if self.is_sophon() {
+                format!("{}/model/chatCompletion", self.base_url)
+            } else {
+                format!("{}/chat/completions", self.base_url)
+            };
             debug!(url = %url, attempt, "Sending OpenAI API request");
 
             let mut req_builder = self
@@ -298,8 +308,14 @@ impl LlmDriver for OpenAIDriver {
                 .json(&oai_request);
 
             if !self.api_key.as_str().is_empty() {
-                req_builder = req_builder
-                    .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                if self.is_sophon() {
+                    req_builder = req_builder
+                        .header("api-key", self.api_key.as_str());
+                    tracing::info!(target: "openai_driver", "Using Sophon AI with api-key header");
+                } else {
+                    req_builder = req_builder
+                        .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                }
             }
 
             let resp = req_builder
@@ -308,6 +324,7 @@ impl LlmDriver for OpenAIDriver {
                 .map_err(|e| LlmError::Http(e.to_string()))?;
 
             let status = resp.status().as_u16();
+            tracing::info!(target: "openai_driver", "LLM response status: {}", status);
             if status == 429 {
                 if attempt < max_retries {
                     let retry_ms = (attempt + 1) as u64 * 2000;
@@ -322,6 +339,7 @@ impl LlmDriver for OpenAIDriver {
 
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
+                tracing::info!(target: "openai_driver", "LLM error response: {}", body);
 
                 // Groq "tool_use_failed": model generated tool call in XML format.
                 // Parse the failed_generation and convert to a proper tool call response.
@@ -362,6 +380,20 @@ impl LlmDriver for OpenAIDriver {
                 .text()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
+            tracing::info!(target: "openai_driver", "LLM success response: {}", body);
+            
+            // Check for Sophon AI error response (success: false)
+            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&body) {
+                if json_val.get("success").and_then(|v| v.as_bool()) == Some(false) {
+                    let msg = json_val.get("message").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                    let status = json_val.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    return Err(LlmError::Api {
+                        status: status.parse().unwrap_or(400),
+                        message: format!("Sophon AI error: {}", msg),
+                    });
+                }
+            }
+            
             let oai_response: OaiResponse =
                 serde_json::from_str(&body).map_err(|e| LlmError::Parse(e.to_string()))?;
 
@@ -568,7 +600,12 @@ impl LlmDriver for OpenAIDriver {
         // Retry loop for the initial HTTP request
         let max_retries = 3;
         for attempt in 0..=max_retries {
-            let url = format!("{}/chat/completions", self.base_url);
+            // Sophon AI uses a different endpoint path
+            let url = if self.is_sophon() {
+                format!("{}/model/chatCompletion", self.base_url)
+            } else {
+                format!("{}/chat/completions", self.base_url)
+            };
             debug!(url = %url, attempt, "Sending OpenAI streaming request");
 
             let mut req_builder = self
@@ -578,8 +615,13 @@ impl LlmDriver for OpenAIDriver {
                 .json(&oai_request);
 
             if !self.api_key.as_str().is_empty() {
-                req_builder = req_builder
-                    .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                if self.is_sophon() {
+                    req_builder = req_builder
+                        .header("api-key", self.api_key.as_str());
+                } else {
+                    req_builder = req_builder
+                        .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                }
             }
 
             let resp = req_builder

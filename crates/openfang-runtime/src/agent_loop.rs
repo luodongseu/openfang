@@ -202,6 +202,7 @@ pub async fn run_agent_loop(
     }
 
     // Add the user message to session history
+    info!(agent = %manifest.name, user_message = %user_message, "Received user message");
     session.messages.push(Message::user(user_message));
 
     // Build the messages for the LLM, filtering system messages

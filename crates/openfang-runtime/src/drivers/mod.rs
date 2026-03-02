@@ -16,7 +16,7 @@ use openfang_types::model_catalog::{
     FIREWORKS_BASE_URL, GEMINI_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, LMSTUDIO_BASE_URL,
     MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
     OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
-    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL,
+    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, SOPHON_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL,
     ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
 };
 use std::sync::Arc;
@@ -160,6 +160,11 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
         "qianfan" | "baidu" => Some(ProviderDefaults {
             base_url: QIANFAN_BASE_URL,
             api_key_env: "QIANFAN_API_KEY",
+            key_required: true,
+        }),
+        "sophon" => Some(ProviderDefaults {
+            base_url: SOPHON_BASE_URL,
+            api_key_env: "SOPHON_API_KEY",
             key_required: true,
         }),
         _ => None,
@@ -324,6 +329,7 @@ pub fn known_providers() -> &'static [&'static str] {
         "zhipu",
         "zhipu_coding",
         "qianfan",
+        "sophon",
     ]
 }
 
@@ -417,7 +423,8 @@ mod tests {
         assert!(providers.contains(&"zhipu"));
         assert!(providers.contains(&"zhipu_coding"));
         assert!(providers.contains(&"qianfan"));
-        assert_eq!(providers.len(), 27);
+        assert!(providers.contains(&"sophon"));
+        assert_eq!(providers.len(), 28);
     }
 
     #[test]
@@ -455,6 +462,14 @@ mod tests {
         let d = provider_defaults("huggingface").unwrap();
         assert_eq!(d.base_url, "https://api-inference.huggingface.co/v1");
         assert_eq!(d.api_key_env, "HF_API_KEY");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_provider_defaults_sophon() {
+        let d = provider_defaults("sophon").unwrap();
+        assert_eq!(d.base_url, "https://sophon-ai.bytedance.net/gateway/openapi");
+        assert_eq!(d.api_key_env, "SOPHON_API_KEY");
         assert!(d.key_required);
     }
 }
