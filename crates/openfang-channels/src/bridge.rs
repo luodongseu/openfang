@@ -347,6 +347,13 @@ async fn send_response(
 ) {
     let formatted = formatter::format_for_channel(&text, output_format);
     let content = ChannelContent::Text(formatted);
+    
+    info!(
+        platform_id = %user.platform_id,
+        has_thread_id = thread_id.is_some(),
+        text_len = text.len(),
+        "Sending response to channel"
+    );
 
     let result = if let Some(tid) = thread_id {
         adapter.send_in_thread(user, content, tid).await
@@ -354,8 +361,9 @@ async fn send_response(
         adapter.send(user, content).await
     };
 
-    if let Err(e) = result {
-        error!("Failed to send response: {e}");
+    match result {
+        Ok(_) => info!("Response sent successfully"),
+        Err(e) => error!(error = %e, "Failed to send response"),
     }
 }
 
@@ -370,6 +378,19 @@ async fn dispatch_message(
     rate_limiter: &ChannelRateLimiter,
 ) {
     let ct_str = channel_type_str(&message.channel);
+    
+    info!(
+        channel = %ct_str,
+        platform_id = %message.sender.platform_id,
+        display_name = %message.sender.display_name,
+        is_group = message.is_group,
+        content_type = match &message.content {
+            ChannelContent::Text(_) => "text",
+            ChannelContent::Command { .. } => "command",
+            _ => "other",
+        },
+        "Dispatching channel message"
+    );
 
     // Fetch per-channel overrides (if configured)
     let overrides = handle.channel_overrides(ct_str).await;
@@ -575,8 +596,12 @@ async fn dispatch_message(
     );
 
     let agent_id = match agent_id {
-        Some(id) => id,
+        Some(id) => {
+            info!(agent_id = %id, "Message routed to agent");
+            id
+        }
         None => {
+            warn!("No agent assigned for this channel");
             send_response(
                 adapter,
                 &message.sender,
@@ -617,16 +642,19 @@ async fn dispatch_message(
     // Send typing indicator (best-effort)
     let _ = adapter.send_typing(&message.sender).await;
 
+    info!(agent_id = %agent_id, text_len = text.len(), "Sending message to agent");
+    
     // Send to agent and relay response
     match handle.send_message(agent_id, &text).await {
         Ok(response) => {
+            info!(response_len = response.len(), "Received response from agent");
             send_response(adapter, &message.sender, response, thread_id, output_format).await;
             handle
                 .record_delivery(agent_id, ct_str, &message.sender.platform_id, true, None)
                 .await;
         }
         Err(e) => {
-            warn!("Agent error for {agent_id}: {e}");
+            error!(agent_id = %agent_id, error = %e, "Agent error");
             let err_msg = format!("Agent error: {e}");
             send_response(
                 adapter,

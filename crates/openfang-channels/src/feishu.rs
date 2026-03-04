@@ -289,9 +289,17 @@ impl FeishuAdapter {
         let token = self.get_token().await?;
         let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, receive_id_type);
 
-        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        info!(
+            receive_id = %receive_id,
+            receive_id_type = %receive_id_type,
+            text_len = text.len(),
+            "Sending Feishu message"
+        );
 
-        for chunk in chunks {
+        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        debug!(chunk_count = chunks.len(), "Message split into chunks");
+
+        for (idx, chunk) in chunks.iter().enumerate() {
             let content = serde_json::json!({
                 "text": chunk,
             });
@@ -302,6 +310,8 @@ impl FeishuAdapter {
                 "content": content.to_string(),
             });
 
+            debug!(chunk_idx = idx, body = %body, "Sending chunk to Feishu");
+
             let resp = self
                 .client
                 .post(&url)
@@ -310,17 +320,27 @@ impl FeishuAdapter {
                 .send()
                 .await?;
 
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let resp_body = resp.text().await.unwrap_or_default();
+            let status = resp.status();
+            let resp_body = resp.text().await.unwrap_or_default();
+            
+            debug!(status = %status, response = %resp_body, "Feishu API response");
+
+            if !status.is_success() {
+                error!(
+                    status = %status,
+                    response = %resp_body,
+                    "Feishu send message HTTP error"
+                );
                 return Err(format!("Feishu send message error {status}: {resp_body}").into());
             }
 
-            let resp_body: serde_json::Value = resp.json().await?;
-            let code = resp_body["code"].as_i64().unwrap_or(-1);
+            let resp_json: serde_json::Value = serde_json::from_str(&resp_body).unwrap_or_default();
+            let code = resp_json["code"].as_i64().unwrap_or(-1);
             if code != 0 {
-                let msg = resp_body["msg"].as_str().unwrap_or("unknown error");
-                warn!("Feishu send message API error: {msg}");
+                let msg = resp_json["msg"].as_str().unwrap_or("unknown error");
+                error!(code = code, msg = %msg, "Feishu send message API error");
+            } else {
+                info!(code = code, "Feishu message sent successfully");
             }
         }
 
@@ -820,10 +840,14 @@ impl FeishuAdapterClone {
 ///
 /// Handles `im.message.receive_v1` events with text message type.
 fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
+    debug!("Parsing Feishu event: {}", event);
+
     let header = event.get("header")?;
     let event_type = header["event_type"].as_str().unwrap_or("");
+    debug!(event_type = %event_type, "Feishu event type");
 
     if event_type != "im.message.receive_v1" {
+        debug!(event_type = %event_type, "Skipping non-message event");
         return None;
     }
 
@@ -832,14 +856,20 @@ fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
     let sender = event_data.get("sender")?;
 
     let msg_type = message["message_type"].as_str().unwrap_or("");
+    debug!(msg_type = %msg_type, "Feishu message type");
+
     if msg_type != "text" {
+        debug!(msg_type = %msg_type, "Skipping non-text message");
         return None;
     }
 
     let content_str = message["content"].as_str().unwrap_or("{}");
     let content_json: serde_json::Value = serde_json::from_str(content_str).unwrap_or_default();
     let text = content_json["text"].as_str().unwrap_or("");
+    debug!(content = %content_str, text = %text, "Feishu message content");
+
     if text.is_empty() {
+        debug!("Skipping empty text message");
         return None;
     }
 
@@ -856,7 +886,18 @@ fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
         .to_string();
     let sender_type = sender["sender_type"].as_str().unwrap_or("user");
 
+    debug!(
+        message_id = %message_id,
+        chat_id = %chat_id,
+        chat_type = %chat_type,
+        sender_id = %sender_id,
+        sender_type = %sender_type,
+        is_thread = root_id.is_some(),
+        "Feishu message parsed"
+    );
+
     if sender_type == "bot" {
+        debug!(sender_id = %sender_id, "Skipping bot message");
         return None;
     }
 
@@ -869,6 +910,11 @@ fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
             .get(1)
             .map(|a| a.split_whitespace().map(String::from).collect())
             .unwrap_or_default();
+        debug!(
+            cmd_name = %cmd_name,
+            args = ?args,
+            "Feishu command parsed"
+        );
         ChannelContent::Command {
             name: cmd_name.to_string(),
             args,
@@ -898,21 +944,32 @@ fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
         metadata.insert("mentions".to_string(), mentions.clone());
     }
 
-    Some(ChannelMessage {
+    let channel_msg = ChannelMessage {
         channel: ChannelType::Custom("feishu".to_string()),
-        platform_message_id: message_id,
+        platform_message_id: message_id.clone(),
         sender: ChannelUser {
-            platform_id: chat_id,
-            display_name: sender_id,
+            platform_id: chat_id.clone(),
+            display_name: sender_id.clone(),
             openfang_user: None,
         },
         content: msg_content,
         target_agent: None,
         timestamp: Utc::now(),
         is_group,
-        thread_id: root_id,
+        thread_id: root_id.clone(),
         metadata,
-    })
+    };
+
+    info!(
+        message_id = %message_id,
+        chat_id = %chat_id,
+        sender_id = %sender_id,
+        is_group = is_group,
+        thread_id = ?root_id,
+        "Feishu event parsed successfully"
+    );
+
+    Some(channel_msg)
 }
 
 #[async_trait]
@@ -951,12 +1008,20 @@ impl ChannelAdapter for FeishuAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        info!(
+            platform_id = %user.platform_id,
+            display_name = %user.display_name,
+            "Sending message to Feishu user"
+        );
+        
         match content {
             ChannelContent::Text(text) => {
+                debug!(text_len = text.len(), "Sending text message");
                 self.api_send_message(&user.platform_id, "chat_id", &text)
                     .await?;
             }
             _ => {
+                warn!("Unsupported content type for Feishu");
                 self.api_send_message(&user.platform_id, "chat_id", "(Unsupported content type)")
                     .await?;
             }

@@ -9,8 +9,9 @@ use crate::SkillManifest;
 /// Return all bundled (name, raw SKILL.md content) pairs.
 pub fn bundled_skills() -> Vec<(&'static str, &'static str)> {
     vec![
-        // Tier 1 (8)
+        // Tier 1 (9)
         ("github", include_str!("../bundled/github/SKILL.md")),
+        ("openfang-dev", include_str!("../bundled/openfang-dev/SKILL.md")),
         ("docker", include_str!("../bundled/docker/SKILL.md")),
         ("web-search", include_str!("../bundled/web-search/SKILL.md")),
         (

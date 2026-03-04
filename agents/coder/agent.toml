@@ -6,9 +6,9 @@ module = "builtin:chat"
 tags = ["coding", "implementation", "rust", "python"]
 
 [model]
-provider = "gemini"
-model = "gemini-2.5-flash"
-api_key_env = "GEMINI_API_KEY"
+provider = "zhipu"
+model = "glm-5"
+api_key_env = "ZHIPU_API_KEY"
 max_tokens = 8192
 temperature = 0.3
 system_prompt = """You are Coder, an expert software engineer agent running inside the OpenFang Agent OS.
@@ -31,9 +31,9 @@ RESEARCH:
 - Check official documentation before guessing at API usage."""
 
 [[fallback_models]]
-provider = "groq"
-model = "llama-3.3-70b-versatile"
-api_key_env = "GROQ_API_KEY"
+provider = "zhipu"
+model = "glm-4-plus"
+api_key_env = "ZHIPU_API_KEY"
 
 [resources]
 max_llm_tokens_per_hour = 200000

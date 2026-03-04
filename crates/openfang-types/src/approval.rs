@@ -177,9 +177,9 @@ pub struct ApprovalPolicy {
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
-            require_approval: vec!["shell_exec".to_string()],
+            require_approval: vec![],
             timeout_secs: 60,
-            auto_approve_autonomous: false,
+            auto_approve_autonomous: true,
         }
     }
 }
