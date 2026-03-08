@@ -534,6 +534,35 @@ pub async fn build_router(
             "/api/namespaces/{id}/routes/{binding_id}",
             axum::routing::delete(routes::namespace_route_delete),
         )
+        // Optimizer API endpoints (self-optimization engine)
+        .route(
+            "/api/optimizer/experiments",
+            axum::routing::get(routes::optimizer_list_experiments).post(routes::optimizer_create_experiment),
+        )
+        .route(
+            "/api/optimizer/experiments/{id}",
+            axum::routing::get(routes::optimizer_get_experiment),
+        )
+        .route(
+            "/api/optimizer/experiments/{id}/stop",
+            axum::routing::post(routes::optimizer_stop_experiment),
+        )
+        .route(
+            "/api/optimizer/metrics",
+            axum::routing::get(routes::optimizer_get_metrics),
+        )
+        .route(
+            "/api/optimizer/suggestions",
+            axum::routing::get(routes::optimizer_get_suggestions),
+        )
+        .route(
+            "/api/optimizer/suggestions/{id}/apply",
+            axum::routing::post(routes::optimizer_apply_suggestion),
+        )
+        .route(
+            "/api/optimizer/analyze",
+            axum::routing::post(routes::optimizer_analyze),
+        )
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))

@@ -9379,3 +9379,370 @@ pub async fn namespace_route_delete(
         ),
     }
 }
+
+// =============================================================================
+// Optimizer API (Self-optimization engine)
+// =============================================================================
+
+use openfang_optimizer::{AbTestConfig, Optimizer, OptimizationCategory, OptimizationTarget};
+
+/// GET /api/optimizer/experiments - List all A/B experiments
+pub async fn optimizer_list_experiments(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let optimizer = match state.kernel.optimizer_engine.read().await.as_ref() {
+        Some(opt) => opt.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Optimizer not initialized"})),
+            );
+        }
+    };
+
+    let namespace_id = params.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    let active_only = params.get("active_only").map(|s| s == "true").unwrap_or(false);
+
+    match optimizer.list_experiments(namespace_id, active_only).await {
+        Ok(experiments) => {
+            let list: Vec<serde_json::Value> = experiments
+                .into_iter()
+                .map(|exp| serde_json::json!({
+                    "id": exp.id,
+                    "name": exp.name,
+                    "description": exp.description,
+                    "status": format!("{:?}", exp.status).to_lowercase(),
+                    "start_time": exp.start_time,
+                    "end_time": exp.end_time,
+                    "winning_variant": exp.winning_variant,
+                }))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"experiments": list, "total": list.len()})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// POST /api/optimizer/experiments - Create a new A/B experiment
+#[derive(serde::Deserialize)]
+pub struct CreateExperimentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub config: ExperimentConfigRequest,
+    pub variants: Vec<VariantRequest>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExperimentConfigRequest {
+    pub min_sample_size: Option<usize>,
+    pub duration_hours: Option<u32>,
+    pub significance_level: Option<f64>,
+    pub primary_metric: String,
+    pub target_improvement: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct VariantRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub is_control: bool,
+    pub traffic_percentage: f64,
+    pub config: HashMap<String, serde_json::Value>,
+}
+
+pub async fn optimizer_create_experiment(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateExperimentRequest>,
+) -> impl IntoResponse {
+    let optimizer = match state.kernel.optimizer_engine.read().await.as_ref() {
+        Some(opt) => opt.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Optimizer not initialized"})),
+            );
+        }
+    };
+
+    let config = AbTestConfig {
+        min_sample_size: req.config.min_sample_size.unwrap_or(100),
+        duration_hours: req.config.duration_hours.unwrap_or(168),
+        significance_level: req.config.significance_level.unwrap_or(0.05),
+        primary_metric: req.config.primary_metric,
+        secondary_metrics: vec![],
+        target_improvement: req.config.target_improvement.unwrap_or(0.05),
+        auto_stop: false,
+    };
+
+    match optimizer.create_experiment(config).await {
+        Ok(exp) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "id": exp.id,
+                "name": exp.name,
+                "status": format!("{:?}", exp.status).to_lowercase(),
+                "created_at": exp.created_at,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// GET /api/optimizer/experiments/{id} - Get experiment details
+pub async fn optimizer_get_experiment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let optimizer = match state.kernel.optimizer_engine.read().await.as_ref() {
+        Some(opt) => opt.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Optimizer not initialized"})),
+            );
+        }
+    };
+
+    match optimizer.get_experiment(&id).await {
+        Ok(Some(exp)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": exp.id,
+                "name": exp.name,
+                "description": exp.description,
+                "status": format!("{:?}", exp.status).to_lowercase(),
+                "config": exp.config,
+                "variants": exp.variants,
+                "start_time": exp.start_time,
+                "end_time": exp.end_time,
+                "winning_variant": exp.winning_variant,
+                "results": exp.results,
+            })),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Experiment not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// POST /api/optimizer/experiments/{id}/stop - Stop an experiment
+#[derive(serde::Deserialize)]
+pub struct StopExperimentRequest {
+    pub winning_variant: Option<String>,
+}
+
+pub async fn optimizer_stop_experiment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<StopExperimentRequest>,
+) -> impl IntoResponse {
+    let optimizer = match state.kernel.optimizer_engine.read().await.as_ref() {
+        Some(opt) => opt.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Optimizer not initialized"})),
+            );
+        }
+    };
+
+    match optimizer.stop_experiment(&id, req.winning_variant).await {
+        Ok(exp) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": exp.id,
+                "name": exp.name,
+                "status": format!("{:?}", exp.status).to_lowercase(),
+                "winning_variant": exp.winning_variant,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// GET /api/optimizer/metrics - Get performance metrics
+pub async fn optimizer_get_metrics(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let optimizer = match state.kernel.optimizer_engine.read().await.as_ref() {
+        Some(opt) => opt.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Optimizer not initialized"})),
+            );
+        }
+    };
+
+    let namespace_id = params.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    let agent_id = params.get("agent_id").map(|s| s.as_str());
+
+    let end = chrono::Utc::now();
+    let start = end - chrono::Duration::hours(24);
+
+    match optimizer.get_metrics(namespace_id, agent_id, start, end).await {
+        Ok(metrics) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "namespace_id": metrics.namespace_id,
+                "start_time": metrics.start_time,
+                "end_time": metrics.end_time,
+                "metrics": metrics.metrics,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// GET /api/optimizer/suggestions - Get optimization suggestions
+pub async fn optimizer_get_suggestions(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let optimizer = match state.kernel.optimizer_engine.read().await.as_ref() {
+        Some(opt) => opt.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Optimizer not initialized"})),
+            );
+        }
+    };
+
+    let namespace_id = params.get("namespace").map(|s| s.as_str()).unwrap_or("default");
+    let agent_id = params.get("agent_id").map(|s| s.as_str());
+
+    match optimizer.analyze(namespace_id, agent_id).await {
+        Ok(suggestions) => {
+            let list: Vec<serde_json::Value> = suggestions
+                .into_iter()
+                .map(|s| serde_json::json!({
+                    "id": s.id,
+                    "timestamp": s.timestamp,
+                    "category": format!("{:?}", s.category).to_lowercase(),
+                    "severity": format!("{:?}", s.severity).to_lowercase(),
+                    "title": s.title,
+                    "description": s.description,
+                    "current_value": s.current_value,
+                    "suggested_value": s.suggested_value,
+                    "confidence": s.confidence,
+                    "auto_applicable": s.auto_applicable,
+                    "applied": s.applied,
+                }))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"suggestions": list, "total": list.len()})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// POST /api/optimizer/suggestions/{id}/apply - Apply an optimization suggestion
+pub async fn optimizer_apply_suggestion(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let optimizer = match state.kernel.optimizer_engine.read().await.as_ref() {
+        Some(opt) => opt.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Optimizer not initialized"})),
+            );
+        }
+    };
+
+    match optimizer.apply_suggestion(&id).await {
+        Ok(suggestion) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": suggestion.id,
+                "title": suggestion.title,
+                "applied": suggestion.applied,
+                "applied_at": suggestion.applied_at,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// POST /api/optimizer/analyze - Trigger manual optimization analysis
+pub async fn optimizer_analyze(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let optimizer = match state.kernel.optimizer_engine.read().await.as_ref() {
+        Some(opt) => opt.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Optimizer not initialized"})),
+            );
+        }
+    };
+
+    let namespace_id = req.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    let agent_id = req.get("agent_id").and_then(|v| v.as_str());
+
+    match optimizer.analyze(namespace_id, agent_id).await {
+        Ok(suggestions) => {
+            let list: Vec<serde_json::Value> = suggestions
+                .into_iter()
+                .map(|s| serde_json::json!({
+                    "id": s.id,
+                    "category": format!("{:?}", s.category).to_lowercase(),
+                    "severity": format!("{:?}", s.severity).to_lowercase(),
+                    "title": s.title,
+                    "description": s.description,
+                    "confidence": s.confidence,
+                    "auto_applicable": s.auto_applicable,
+                }))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "suggestions": list,
+                    "total": list.len(),
+                    "namespace": namespace_id,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}

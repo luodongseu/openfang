@@ -18,6 +18,7 @@ openfang-extensions = { path = "../openfang-extensions" }
 openfang-migrate = { path = "../openfang-migrate" }
 openfang-scheduler = { path = "../openfang-scheduler" }
 openfang-namespace = { path = "../openfang-namespace" }
+openfang-optimizer = { path = "../openfang-optimizer" }
 dashmap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

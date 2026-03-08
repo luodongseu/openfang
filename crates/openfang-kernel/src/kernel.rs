@@ -123,6 +123,8 @@ pub struct OpenFangKernel {
     pub namespace_manager: tokio::sync::RwLock<Option<Arc<openfang_namespace::NamespaceRegistry>>>,
     /// Scheduler engine for job scheduling.
     pub scheduler_engine: tokio::sync::Mutex<Option<Arc<openfang_scheduler::SchedulerEngine>>>,
+    /// Optimizer engine for self-optimization.
+    pub optimizer_engine: tokio::sync::RwLock<Option<Arc<openfang_optimizer::OptimizerEngine>>>,
     /// OFP peer registry — tracks connected peers.
     pub peer_registry: Option<openfang_wire::PeerRegistry>,
     /// OFP peer node — the local networking node.
@@ -878,6 +880,7 @@ impl OpenFangKernel {
             process_manager: Arc::new(openfang_runtime::process_manager::ProcessManager::new(5)),
             namespace_manager: tokio::sync::RwLock::new(None),
             scheduler_engine: tokio::sync::Mutex::new(None),
+            optimizer_engine: tokio::sync::RwLock::new(None),
             peer_registry: None,
             peer_node: None,
             booted_at: std::time::Instant::now(),

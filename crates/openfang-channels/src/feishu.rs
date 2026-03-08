@@ -325,7 +325,7 @@ impl FeishuAdapter {
 
             let status = resp.status();
             let resp_body = resp.text().await.unwrap_or_default();
-            
+
             debug!(status = %status, response = %resp_body, "Feishu API response");
 
             if !status.is_success() {
@@ -369,7 +369,7 @@ impl FeishuAdapter {
         // Build card content with markdown support
         // Split long messages into multiple cards if needed
         let chunks = split_message(text, MAX_MESSAGE_LEN);
-        
+
         for (idx, chunk) in chunks.iter().enumerate() {
             // Convert markdown to Feishu card format
             let card_content = build_markdown_card(chunk);
@@ -392,7 +392,7 @@ impl FeishuAdapter {
 
             let status = resp.status();
             let resp_body = resp.text().await.unwrap_or_default();
-            
+
             debug!(status = %status, response = %resp_body, "Feishu API response");
 
             if !status.is_success() {
@@ -451,7 +451,7 @@ impl FeishuAdapter {
 
         let status = resp.status();
         let resp_body = resp.text().await.unwrap_or_default();
-        
+
         if !status.is_success() {
             error!(
                 status = %status,
@@ -481,7 +481,9 @@ impl FeishuAdapter {
         let url = FEISHU_REACTION_URL.replace("{message_id}", message_id);
 
         let body = serde_json::json!({
-            "reaction_type": emoji_type,
+            "reaction_type": {
+                "emoji_type": emoji_type
+            },
         });
 
         info!(message_id = %message_id, emoji_type = %emoji_type, "Adding Feishu reaction");
@@ -666,12 +668,12 @@ impl FeishuAdapter {
     /// Start WebSocket connection loop (WebSocket mode).
     async fn start_websocket_loop(&self, tx: mpsc::Sender<ChannelMessage>) -> Result<(), Box<dyn std::error::Error>> {
         let self_arc = Arc::new(self.clone_adapter());
-        
+
         tokio::spawn(async move {
             info!("Starting Feishu WebSocket mode");
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(60);
-            
+
             loop {
                 match Self::run_websocket_inner(self_arc.clone(), tx.clone()).await {
                     Ok(_) => {
@@ -681,7 +683,7 @@ impl FeishuAdapter {
                         error!("Feishu WebSocket error: {e}, reconnecting in {backoff:?}");
                     }
                 }
-                
+
                 tokio::time::sleep(backoff).await;
                 backoff = std::cmp::min(backoff * 2, max_backoff);
             }
@@ -707,7 +709,7 @@ impl FeishuAdapter {
         tx: mpsc::Sender<ChannelMessage>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (ws_url, client_config) = adapter.get_websocket_endpoint().await?;
-        
+
         // Extract service_id from URL query params
         let service_id = ws_url
             .split('?')
@@ -719,7 +721,7 @@ impl FeishuAdapter {
                     .and_then(|v| v.parse::<i32>().ok())
             })
             .unwrap_or(0);
-        
+
         info!("Connecting to Feishu WebSocket endpoint: {ws_url}");
 
         let (ws_stream, _) = connect_async(&ws_url).await?;
@@ -982,7 +984,7 @@ impl FeishuAdapterClone {
     /// Get WebSocket endpoint from Feishu API.
     async fn get_websocket_endpoint(&self) -> Result<(String, WsClientConfig), Box<dyn std::error::Error>> {
         let url = "https://open.feishu.cn/callback/ws/endpoint";
-        
+
         let resp = self
             .client
             .post(url)
@@ -1009,7 +1011,7 @@ impl FeishuAdapterClone {
         let ep = resp_body
             .data
             .ok_or("Missing WebSocket endpoint data")?;
-        
+
         Ok((ep.url, ep.client_config.unwrap_or_default()))
     }
 }
@@ -1191,7 +1193,7 @@ impl ChannelAdapter for FeishuAdapter {
             display_name = %user.display_name,
             "Sending message to Feishu user"
         );
-        
+
         match content {
             ChannelContent::Text(text) => {
                 debug!(text_len = text.len(), "Sending text message as card");
@@ -1288,16 +1290,16 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
     let mut elements = vec![];
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
-    
+
     while i < lines.len() {
         let line = lines[i].trim_end();
-        
+
         // Skip empty lines
         if line.trim().is_empty() {
             i += 1;
             continue;
         }
-        
+
         // Header level 2: ## Title
         if line.starts_with("## ") {
             let title = line[3..].trim();
@@ -1317,7 +1319,7 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
             i += 1;
             continue;
         }
-        
+
         // Header level 3: ### Title
         if line.starts_with("### ") {
             let title = line[4..].trim();
@@ -1336,7 +1338,7 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
             i += 1;
             continue;
         }
-        
+
         // Divider
         if line.trim() == "---" {
             elements.push(serde_json::json!({
@@ -1346,37 +1348,37 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
             i += 1;
             continue;
         }
-        
+
         // Code block
         if line.trim().starts_with("```") {
             let lang = line.trim()[3..].trim();
             let mut code_content = vec![];
             i += 1;
-            
+
             while i < lines.len() && !lines[i].trim().starts_with("```") {
                 code_content.push(lines[i]);
                 i += 1;
             }
-            
+
             let code = code_content.join("\n");
             elements.push(serde_json::json!({
                 "tag": "code_block",
                 "language": if lang.is_empty() { "plain" } else { lang },
                 "text": code
             }));
-            
+
             i += 1; // Skip closing ```
             continue;
         }
-        
+
         // List items - collect consecutive list items
         if line.trim().starts_with("- ") || line.trim().starts_with("* ") {
             let mut items = vec![];
-            
+
             while i < lines.len() {
                 let item_line = lines[i].trim_end();
                 let trimmed = item_line.trim_start();
-                
+
                 if trimmed.starts_with("- ") {
                     let content = &trimmed[2..];
                     items.push(format!("• {}", content));
@@ -1393,7 +1395,7 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
                     break;
                 }
             }
-            
+
             if !items.is_empty() {
                 elements.push(serde_json::json!({
                     "tag": "div",
@@ -1406,14 +1408,14 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
             }
             continue;
         }
-        
+
         // Regular paragraph with inline formatting
         let mut paragraph_lines = vec![];
-        
+
         while i < lines.len() {
             let pline = lines[i].trim_end();
-            
-            if pline.trim().is_empty() 
+
+            if pline.trim().is_empty()
                 || pline.starts_with("## ")
                 || pline.starts_with("### ")
                 || pline.trim() == "---"
@@ -1422,16 +1424,16 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
                 || pline.trim().starts_with("* ") {
                 break;
             }
-            
+
             paragraph_lines.push(pline);
             i += 1;
         }
-        
+
         if !paragraph_lines.is_empty() {
             let content = paragraph_lines.join("\n");
             // Process inline formatting
             let processed = process_inline_styles(&content);
-            
+
             elements.push(serde_json::json!({
                 "tag": "div",
                 "text": {
@@ -1442,7 +1444,7 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
             }));
         }
     }
-    
+
     // Fallback: if no elements, return raw text
     if elements.is_empty() {
         elements.push(serde_json::json!({
@@ -1453,18 +1455,18 @@ fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
             }
         }));
     }
-    
+
     elements
 }
 
 /// Process inline styles like **bold** and *italic*
 fn process_inline_styles(text: &str) -> String {
     let mut result = text.to_string();
-    
+
     // Note: plain_text doesn't support markdown inline styles
     // We keep the ** and * markers as-is for visual indication
     // or remove them for cleaner display
-    
+
     // Remove ** markers but keep content
     while let Some(start) = result.find("**") {
         if let Some(end) = result[start+2..].find("**") {
@@ -1476,7 +1478,7 @@ fn process_inline_styles(text: &str) -> String {
             break;
         }
     }
-    
+
     result
 }
 
@@ -1484,14 +1486,14 @@ fn process_inline_styles(text: &str) -> String {
 /// Post messages support rich text formatting with better markdown support.
 fn build_post_content(title: &str, content: &str) -> String {
     let mut post_lines: Vec<serde_json::Value> = vec![];
-    
+
     for line in content.lines() {
         let trimmed = line.trim();
-        
+
         if trimmed.is_empty() {
             continue;
         }
-        
+
         // Header level 2
         if trimmed.starts_with("## ") {
             let text = &trimmed[3..];
@@ -1502,7 +1504,7 @@ fn build_post_content(title: &str, content: &str) -> String {
             }]));
             continue;
         }
-        
+
         // Header level 3
         if trimmed.starts_with("### ") {
             let text = &trimmed[4..];
@@ -1513,7 +1515,7 @@ fn build_post_content(title: &str, content: &str) -> String {
             }]));
             continue;
         }
-        
+
         // List item
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
             let text = &trimmed[2..];
@@ -1523,19 +1525,19 @@ fn build_post_content(title: &str, content: &str) -> String {
             }]));
             continue;
         }
-        
+
         // Regular line with inline formatting
         let processed = process_inline_for_post(trimmed);
         post_lines.push(processed);
     }
-    
+
     let post_obj = serde_json::json!({
         "zh_cn": {
             "title": title,
             "content": post_lines
         }
     });
-    
+
     post_obj.to_string()
 }
 
@@ -1543,7 +1545,7 @@ fn build_post_content(title: &str, content: &str) -> String {
 fn process_inline_for_post(line: &str) -> serde_json::Value {
     let mut parts = vec![];
     let mut remaining = line;
-    
+
     while !remaining.is_empty() {
         // Find bold text **text**
         if let Some(start) = remaining.find("**") {
@@ -1554,7 +1556,7 @@ fn process_inline_for_post(line: &str) -> serde_json::Value {
                     "text": &remaining[..start]
                 }));
             }
-            
+
             // Find end of bold
             if let Some(end) = remaining[start+2..].find("**") {
                 let content = &remaining[start+2..start+2+end];
@@ -1581,7 +1583,7 @@ fn process_inline_for_post(line: &str) -> serde_json::Value {
             break;
         }
     }
-    
+
     // Add newline at the end
     if let Some(last) = parts.last_mut() {
         if let Some(obj) = last.as_object_mut() {
@@ -1592,7 +1594,7 @@ fn process_inline_for_post(line: &str) -> serde_json::Value {
             }
         }
     }
-    
+
     serde_json::Value::Array(parts)
 }
 

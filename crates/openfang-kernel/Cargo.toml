@@ -16,6 +16,7 @@ openfang-wire = { path = "../openfang-wire" }
 openfang-channels = { path = "../openfang-channels" }
 openfang-scheduler = { path = "../openfang-scheduler" }
 openfang-namespace = { path = "../openfang-namespace" }
+openfang-optimizer = { path = "../openfang-optimizer" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
