@@ -49,6 +49,7 @@ pub async fn build_router(
         bridge_manager: tokio::sync::Mutex::new(bridge),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+        scheduler: tokio::sync::RwLock::new(None),
     });
 
     // CORS: allow localhost origins by default. If API key is set, the API
@@ -494,6 +495,23 @@ pub async fn build_router(
         .route(
             "/api/cron/jobs/{id}/status",
             axum::routing::get(routes::cron_job_status),
+        )
+        // New Scheduler API endpoints (openfang-scheduler)
+        .route(
+            "/api/scheduler/jobs",
+            axum::routing::get(routes::scheduler_list_jobs).post(routes::scheduler_create_job),
+        )
+        .route(
+            "/api/scheduler/jobs/{id}",
+            axum::routing::get(routes::scheduler_get_job).delete(routes::scheduler_delete_job),
+        )
+        .route(
+            "/api/scheduler/jobs/{id}/control",
+            axum::routing::post(routes::scheduler_control_job),
+        )
+        .route(
+            "/api/scheduler/jobs/{id}/history",
+            axum::routing::get(routes::scheduler_job_history),
         )
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))

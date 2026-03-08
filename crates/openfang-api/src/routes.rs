@@ -33,6 +33,8 @@ pub struct AppState {
     pub channels_config: tokio::sync::RwLock<openfang_types::config::ChannelsConfig>,
     /// Notify handle to trigger graceful HTTP server shutdown from the API.
     pub shutdown_notify: Arc<tokio::sync::Notify>,
+    /// Scheduler engine for job scheduling (initialized on first use)
+    pub scheduler: tokio::sync::RwLock<Option<Arc<dyn openfang_scheduler::Scheduler>>>,
 }
 
 /// POST /api/agents — Spawn a new agent.
@@ -8702,4 +8704,319 @@ fn validate_webhook_token(headers: &axum::http::HeaderMap, token_env: &str) -> b
         return false;
     }
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+// =============================================================================
+// Scheduler API (openfang-scheduler integration)
+// =============================================================================
+
+use openfang_scheduler::{ControlAction, JobStatus, ScheduledJob, Scheduler, TriggerType};
+
+/// GET /api/scheduler/jobs - List all scheduled jobs
+pub async fn scheduler_list_jobs(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // Check if scheduler is available
+    let scheduler_guard = state.scheduler.read().await;
+    let scheduler = match scheduler_guard.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Scheduler not initialized"})),
+            );
+        }
+    };
+    drop(scheduler_guard);
+
+    match scheduler.list_jobs().await {
+        Ok(jobs) => {
+            let job_list: Vec<serde_json::Value> = jobs
+                .into_iter()
+                .map(|j| serde_json::json!({
+                    "id": j.id,
+                    "name": j.name,
+                    "hand_id": j.hand_id,
+                    "status": format!("{:?}", j.status).to_lowercase(),
+                    "trigger": j.trigger,
+                    "next_run_at": j.next_run_at,
+                    "last_run_at": j.last_run_at,
+                    "created_at": j.created_at,
+                }))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"jobs": job_list, "total": job_list.len()})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// POST /api/scheduler/jobs - Create a new scheduled job
+#[derive(serde::Deserialize)]
+pub struct CreateJobRequest {
+    pub name: String,
+    pub hand_id: String,
+    pub trigger: TriggerRequest,
+    #[serde(default)]
+    pub retry_policy: Option<RetryPolicyRequest>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerRequest {
+    Cron { expression: String, timezone: Option<String> },
+    Interval { seconds: u64, jitter_seconds: Option<u64> },
+    Event { pattern: String },
+    Condition { metric: String, threshold: f64, operator: String },
+}
+
+#[derive(serde::Deserialize)]
+pub struct RetryPolicyRequest {
+    pub max_retries: u32,
+    pub initial_delay_secs: u64,
+    pub backoff_multiplier: f64,
+    pub max_delay_secs: u64,
+}
+
+pub async fn scheduler_create_job(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateJobRequest>,
+) -> impl IntoResponse {
+    let scheduler_guard = state.scheduler.read().await;
+    let scheduler = match scheduler_guard.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Scheduler not initialized"})),
+            );
+        }
+    };
+
+    // Convert trigger request to TriggerType
+    let trigger = match req.trigger {
+        TriggerRequest::Cron { expression, timezone } => {
+            TriggerType::Cron {
+                expression,
+                timezone: timezone.unwrap_or_else(|| "UTC".to_string()),
+            }
+        }
+        TriggerRequest::Interval { seconds, jitter_seconds } => {
+            TriggerType::Interval { seconds, jitter_seconds }
+        }
+        TriggerRequest::Event { pattern } => TriggerType::Event { pattern },
+        TriggerRequest::Condition { metric, threshold, operator } => {
+            TriggerType::Condition { metric, threshold, operator }
+        }
+    };
+
+    let job = ScheduledJob::new(req.name, req.hand_id, trigger);
+
+    // Apply custom retry policy if provided
+    let job = if let Some(policy) = req.retry_policy {
+        job.with_retry_policy(openfang_scheduler::RetryPolicy {
+            max_retries: policy.max_retries,
+            initial_delay_secs: policy.initial_delay_secs,
+            backoff_multiplier: policy.backoff_multiplier,
+            max_delay_secs: policy.max_delay_secs,
+        })
+    } else {
+        job
+    };
+
+    match scheduler.create_job(job).await {
+        Ok(created) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "id": created.id,
+                "name": created.name,
+                "hand_id": created.hand_id,
+                "status": format!("{:?}", created.status).to_lowercase(),
+                "next_run_at": created.next_run_at,
+                "created_at": created.created_at,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// GET /api/scheduler/jobs/:id - Get a specific job
+pub async fn scheduler_get_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let scheduler_guard = state.scheduler.read().await;
+    let scheduler = match scheduler_guard.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Scheduler not initialized"})),
+            );
+        }
+    };
+
+    match scheduler.get_job(&id).await {
+        Ok(Some(job)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": job.id,
+                "name": job.name,
+                "hand_id": job.hand_id,
+                "trigger": job.trigger,
+                "status": format!("{:?}", job.status).to_lowercase(),
+                "retry_policy": job.retry_policy,
+                "next_run_at": job.next_run_at,
+                "last_run_at": job.last_run_at,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+                "metadata": job.metadata,
+            })),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Job not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// DELETE /api/scheduler/jobs/:id - Delete a job
+pub async fn scheduler_delete_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let scheduler_guard = state.scheduler.read().await;
+    let scheduler = match scheduler_guard.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Scheduler not initialized"})),
+            );
+        }
+    };
+
+    match scheduler.delete_job(&id).await {
+        Ok(()) => (
+            StatusCode::NO_CONTENT,
+            Json(serde_json::json!({})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// POST /api/scheduler/jobs/:id/control - Control job (pause/resume/trigger/cancel)
+#[derive(serde::Deserialize)]
+pub struct ControlJobRequest {
+    pub action: String,
+}
+
+pub async fn scheduler_control_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ControlJobRequest>,
+) -> impl IntoResponse {
+    let scheduler_guard = state.scheduler.read().await;
+    let scheduler = match scheduler_guard.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Scheduler not initialized"})),
+            );
+        }
+    };
+
+    let action = match req.action.parse::<ControlAction>() {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            );
+        }
+    };
+
+    match scheduler.control_job(&id, action).await {
+        Ok(job) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": job.id,
+                "name": job.name,
+                "status": format!("{:?}", job.status).to_lowercase(),
+                "next_run_at": job.next_run_at,
+                "action": format!("{:?}", action).to_lowercase(),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// GET /api/scheduler/jobs/:id/history - Get job execution history
+pub async fn scheduler_job_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let scheduler_guard = state.scheduler.read().await;
+    let scheduler = match scheduler_guard.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Scheduler not initialized"})),
+            );
+        }
+    };
+
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<usize>().ok())
+        .unwrap_or(20);
+
+    match scheduler.get_job_history(&id, limit).await {
+        Ok(executions) => {
+            let history: Vec<serde_json::Value> = executions
+                .into_iter()
+                .map(|e| serde_json::json!({
+                    "id": e.id,
+                    "job_id": e.job_id,
+                    "started_at": e.started_at,
+                    "completed_at": e.completed_at,
+                    "status": format!("{:?}", e.status).to_lowercase(),
+                    "output": e.output,
+                    "error_message": e.error_message,
+                    "fuel_consumed": e.fuel_consumed,
+                }))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"history": history, "total": history.len()})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
 }

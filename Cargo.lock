@@ -4068,6 +4068,7 @@ dependencies = [
  "openfang-memory",
  "openfang-migrate",
  "openfang-runtime",
+ "openfang-scheduler",
  "openfang-skills",
  "openfang-types",
  "openfang-wire",
