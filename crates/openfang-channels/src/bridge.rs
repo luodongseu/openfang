@@ -5,7 +5,7 @@
 
 use crate::formatter;
 use crate::router::AgentRouter;
-use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser};
+use crate::types::{AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser, LifecycleReaction};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -15,6 +15,349 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
+
+// ── Natural Language Schedule Parser ─────────────────────────────────────
+
+/// Parsed result from natural language schedule input.
+#[derive(Debug, Clone)]
+pub struct ParsedReminder {
+    /// The cron expression (5 fields: min hour dom month dow)
+    pub cron_expr: String,
+    /// The message/reminder content
+    pub message: String,
+    /// Human-readable description of the schedule
+    pub description: String,
+}
+
+/// Parse natural language reminder text into a structured reminder.
+///
+/// Supports patterns like:
+/// - "每天9点提醒我给客户发邮件" -> "0 9 * * *"
+/// - "每周一上午8点生成周报" -> "0 8 * * 1"
+/// - "30分钟后提醒我倒水" -> "+30m" (special format for one-shot)
+/// - "每5分钟提醒我喝水" -> "*/5 * * * *"
+/// - "明天下午3点开会" -> "0 15 * * *" (with next-day offset)
+/// - "每小时提醒我活动一下" -> "0 * * * *"
+///
+/// Returns None if the input doesn't match any known pattern.
+pub fn parse_reminder(text: &str) -> Option<ParsedReminder> {
+    let text = text.trim();
+
+    // Pattern: 每X分钟/小时/天
+    if let Some(reminder) = parse_every_pattern(text) {
+        return Some(reminder);
+    }
+
+    // Pattern: 每天HH点
+    if let Some(reminder) = parse_daily_pattern(text) {
+        return Some(reminder);
+    }
+
+    // Pattern: 每周X
+    if let Some(reminder) = parse_weekly_pattern(text) {
+        return Some(reminder);
+    }
+
+    // Pattern: X分钟后/小时后
+    if let Some(reminder) = parse_after_pattern(text) {
+        return Some(reminder);
+    }
+
+    // Pattern: 明天/后天 HH点
+    if let Some(reminder) = parse_future_day_pattern(text) {
+        return Some(reminder);
+    }
+
+    // Pattern: 每小时/每分钟
+    if let Some(reminder) = parse_hourly_minutely_pattern(text) {
+        return Some(reminder);
+    }
+
+    None
+}
+
+/// Parse "每X分钟/小时/天" patterns.
+fn parse_every_pattern(text: &str) -> Option<ParsedReminder> {
+    // Match: 每5分钟, 每2小时, 每3天
+    let patterns = [
+        (r"^每(\d+)分钟[提醒通知]?(我)?(.*)$", "分钟", 60),
+        (r"^每(\d+)小?时[提醒通知]?(我)?(.*)$", "小时", 3600),
+        (r"^每(\d+)天[提醒通知]?(我)?(.*)$", "天", 86400),
+    ];
+
+    for (pattern, unit, _secs) in patterns {
+        let re = regex_lite::Regex::new(pattern).ok()?;
+        if let Some(caps) = re.captures(text) {
+            let num_str = caps.get(1)?.as_str();
+            let num: u32 = num_str.parse().ok()?;
+            let message = caps.get(3)?.as_str().trim();
+            if message.is_empty() {
+                return None;
+            }
+
+            let (cron_expr, desc) = match unit {
+                "分钟" => {
+                    if num < 1 || num > 59 {
+                        return None;
+                    }
+                    (format!("*/{} * * * *", num), format!("每{}分钟", num))
+                }
+                "小时" => {
+                    if num < 1 || num > 23 {
+                        return None;
+                    }
+                    (format!("0 */{} * * *", num), format!("每{}小时", num))
+                }
+                "天" => {
+                    if num < 1 || num > 31 {
+                        return None;
+                    }
+                    (format!("0 0 */{} * *", num), format!("每{}天", num))
+                }
+                _ => return None,
+            };
+
+            return Some(ParsedReminder {
+                cron_expr,
+                message: message.to_string(),
+                description: desc,
+            });
+        }
+    }
+
+    None
+}
+
+/// Parse "每天HH点" patterns.
+fn parse_daily_pattern(text: &str) -> Option<ParsedReminder> {
+    // Match: 每天9点, 每天上午9点, 每天下午3点, 每天14点
+    let patterns = [
+        r"^每天上午?(\d{1,2})点[提醒通知]?(我)?(.*)$",
+        r"^每天下午(\d{1,2})点[提醒通知]?(我)?(.*)$",
+        r"^每天(\d{1,2})点[提醒通知]?(我)?(.*)$",
+        r"^每天(\d{1,2}):(\d{2})[提醒通知]?(我)?(.*)$",
+    ];
+
+    for (i, pattern) in patterns.iter().enumerate() {
+        let re = regex_lite::Regex::new(pattern).ok()?;
+        if let Some(caps) = re.captures(text) {
+            let hour_str = caps.get(1)?.as_str();
+            let hour: u32 = hour_str.parse().ok()?;
+            let minute: u32 = if i == 3 {
+                // HH:MM format
+                caps.get(2)?.as_str().parse().ok()?
+            } else {
+                0
+            };
+
+            let msg_idx = if i == 3 { 4 } else { 3 };
+            let message = caps.get(msg_idx)?.as_str().trim();
+            if message.is_empty() {
+                return None;
+            }
+
+            // Adjust for PM (下午)
+            let hour = if i == 1 && hour < 12 {
+                hour + 12
+            } else {
+                hour
+            };
+
+            if hour > 23 || minute > 59 {
+                return None;
+            }
+
+            return Some(ParsedReminder {
+                cron_expr: format!("{} {} * * *", minute, hour),
+                message: message.to_string(),
+                description: format!("每天{:02}:{:02}", hour, minute),
+            });
+        }
+    }
+
+    None
+}
+
+/// Parse "每周X" patterns.
+fn parse_weekly_pattern(text: &str) -> Option<ParsedReminder> {
+    // Match: 每周一上午9点, 每周三下午3点, 每周五
+    let days = [("一", "1"), ("二", "2"), ("三", "3"), ("四", "4"), ("五", "5"), ("六", "6"), ("日", "0"), ("天", "0")];
+
+    for (cn_day, cron_day) in days {
+        let pattern = format!(r"^每周{}[上下午]?(\d{{1,2}})?点?[提醒通知]?(我)?(.*)$", cn_day);
+        let re = regex_lite::Regex::new(&pattern).ok()?;
+
+        if let Some(caps) = re.captures(text) {
+            let hour: u32 = caps.get(1)
+                .map(|m| m.as_str().parse::<u32>().ok())
+                .flatten()
+                .unwrap_or(9);
+            let message = caps.get(3)?.as_str().trim();
+            if message.is_empty() {
+                return None;
+            }
+
+            let day_names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+            let day_name = day_names[cron_day.parse::<usize>().ok()?];
+
+            return Some(ParsedReminder {
+                cron_expr: format!("0 {} * * {}", hour, cron_day),
+                message: message.to_string(),
+                description: format!("每周{}{:02}:00", day_name, hour),
+            });
+        }
+    }
+
+    None
+}
+
+/// Parse "X分钟后/小时后" patterns (one-shot reminders).
+fn parse_after_pattern(text: &str) -> Option<ParsedReminder> {
+    // Match: 30分钟后, 1小时后, 2小时后提醒我
+    let patterns = [
+        (r"^(\d+)分钟后[提醒通知]?(我)?(.*)$", 1),
+        (r"^(\d+)小?时后[提醒通知]?(我)?(.*)$", 60),
+    ];
+
+    for (pattern, multiplier) in patterns {
+        let re = regex_lite::Regex::new(pattern).ok()?;
+        if let Some(caps) = re.captures(text) {
+            let num_str = caps.get(1)?.as_str();
+            let num: u32 = num_str.parse().ok()?;
+            let message = caps.get(3)?.as_str().trim();
+            if message.is_empty() {
+                return None;
+            }
+
+            let minutes = num * multiplier;
+            if minutes > 1440 { // Max 24 hours for one-shot
+                return None;
+            }
+
+            return Some(ParsedReminder {
+                // Special marker for one-shot reminders
+                cron_expr: format!("+{}m", minutes),
+                message: message.to_string(),
+                description: format!("{}分钟后", if multiplier == 60 { num } else { minutes }),
+            });
+        }
+    }
+
+    None
+}
+
+/// Parse "明天/后天 HH点" patterns.
+fn parse_future_day_pattern(text: &str) -> Option<ParsedReminder> {
+    // This creates a one-shot job at a specific future time
+    let patterns = [
+        (r"^明天(\d{1,2})点[提醒通知]?(我)?(.*)$", 1),
+        (r"^后天(\d{1,2})点[提醒通知]?(我)?(.*)$", 2),
+        (r"^明天上午(\d{1,2})点[提醒通知]?(我)?(.*)$", 1),
+        (r"^明天下午(\d{1,2})点[提醒通知]?(我)?(.*)$", 1),
+    ];
+
+    for (pattern, day_offset) in patterns {
+        let re = regex_lite::Regex::new(pattern).ok()?;
+        if let Some(caps) = re.captures(text) {
+            let hour_str = caps.get(1)?.as_str();
+            let hour: u32 = hour_str.parse().ok()?;
+            let message = caps.get(3)?.as_str().trim();
+            if message.is_empty() {
+                return None;
+            }
+
+            let hour = if pattern.contains("下午") && hour < 12 {
+                hour + 12
+            } else {
+                hour
+            };
+
+            let day_desc = if day_offset == 1 { "明天" } else { "后天" };
+
+            return Some(ParsedReminder {
+                // Special format: +<days>d<minute>h<hour>m (one-shot)
+                cron_expr: format!("+{}d0h{}m", day_offset, hour),
+                message: message.to_string(),
+                description: format!("{}{:02}:00", day_desc, hour),
+            });
+        }
+    }
+
+    None
+}
+
+/// Parse "每小时/每分钟" patterns.
+fn parse_hourly_minutely_pattern(text: &str) -> Option<ParsedReminder> {
+    let patterns = [
+        (r"^每小时[提醒通知]?(我)?(.*)$", "0 * * * *", "每小时"),
+        (r"^每分钟[提醒通知]?(我)?(.*)$", "* * * * *", "每分钟"),
+    ];
+
+    for (pattern, cron, desc) in patterns {
+        let re = regex_lite::Regex::new(pattern).ok()?;
+        if let Some(caps) = re.captures(text) {
+            let message = caps.get(2)?.as_str().trim();
+            if message.is_empty() {
+                return None;
+            }
+
+            return Some(ParsedReminder {
+                cron_expr: cron.to_string(),
+                message: message.to_string(),
+                description: desc.to_string(),
+            });
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_every_minutes() {
+        let r = parse_reminder("每5分钟提醒我喝水").unwrap();
+        assert_eq!(r.cron_expr, "*/5 * * * *");
+        assert_eq!(r.message, "喝水");
+    }
+
+    #[test]
+    fn test_parse_daily() {
+        let r = parse_reminder("每天9点提醒我给客户发邮件").unwrap();
+        assert_eq!(r.cron_expr, "0 9 * * *");
+        assert_eq!(r.message, "给客户发邮件");
+    }
+
+    #[test]
+    fn test_parse_daily_pm() {
+        let r = parse_reminder("每天下午3点提醒我倒水").unwrap();
+        assert_eq!(r.cron_expr, "0 15 * * *");
+        assert_eq!(r.message, "倒水");
+    }
+
+    #[test]
+    fn test_parse_weekly() {
+        let r = parse_reminder("每周一上午8点生成周报").unwrap();
+        assert_eq!(r.cron_expr, "0 8 * * 1");
+        assert_eq!(r.message, "生成周报");
+    }
+
+    #[test]
+    fn test_parse_after_minutes() {
+        let r = parse_reminder("30分钟后提醒我开会").unwrap();
+        assert_eq!(r.cron_expr, "+30m");
+        assert_eq!(r.message, "开会");
+    }
+
+    #[test]
+    fn test_parse_hourly() {
+        let r = parse_reminder("每小时提醒我活动一下").unwrap();
+        assert_eq!(r.cron_expr, "0 * * * *");
+        assert_eq!(r.message, "活动一下");
+    }
+}
 
 /// Kernel operations needed by channel adapters.
 ///
@@ -168,6 +511,18 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Manage a cron job: add, del, or run.
     async fn manage_schedule_text(&self, _action: &str, _args: &[String]) -> String {
         "Schedules not available.".to_string()
+    }
+
+    /// Create a reminder from natural language text.
+    ///
+    /// Parses text like "每天9点提醒我给客户发邮件" and creates a scheduled job.
+    /// Returns the job ID prefix or an error message.
+    async fn create_reminder_text(
+        &self,
+        _agent_name: &str,
+        _natural_text: &str,
+    ) -> String {
+        "Reminders not available.".to_string()
     }
 
     /// List pending approval requests as formatted text.
@@ -541,7 +896,7 @@ async fn dispatch_message(
                 .await;
                 return;
             }
-            let _ = adapter.send_typing(&message.sender).await;
+            let _ = adapter.send_typing(&message.sender, &message.platform_message_id).await;
 
             let strategy = router.broadcast_strategy();
             let mut responses = Vec::new();
@@ -639,8 +994,16 @@ async fn dispatch_message(
         return;
     }
 
+    // Send "thinking" reaction to show we're processing (best-effort)
+    let thinking_reaction = LifecycleReaction {
+        phase: AgentPhase::Thinking,
+        emoji: "\u{1F914}".to_string(), // 🤔
+        remove_previous: false,
+    };
+    let _ = adapter.send_reaction(&message.sender, &message.platform_message_id, &thinking_reaction).await;
+
     // Send typing indicator (best-effort)
-    let _ = adapter.send_typing(&message.sender).await;
+    let _ = adapter.send_typing(&message.sender, &message.platform_message_id).await;
 
     info!(agent_id = %agent_id, text_len = text.len(), "Sending message to agent");
     
@@ -729,7 +1092,8 @@ async fn handle_command(
              /schedule add <agent> <cron-5-fields> <message> - create job\n\
              /schedule del <id> - remove job\n\
              /schedule run <id> - run job now\n\
-             /approvals - list pending approvals\n\
+             /remind <natural language> - create reminder from natural language
+\n             /approvals - list pending approvals\n\
              /approve <id> - approve a request\n\
              /reject <id> - reject a request\n\
              \n\
@@ -924,6 +1288,61 @@ async fn handle_command(
                     handle.manage_schedule_text(action, &args[1..]).await
                 }
                 _ => "Usage:\n  /schedule add <agent> <cron-5-fields> <message>\n  /schedule del <id-prefix>\n  /schedule run <id-prefix>".to_string(),
+            }
+        }
+        "remind" => {
+            if args.is_empty() {
+                return "Usage: /remind <natural language reminder>\n\nExamples:\n  /remind 每天9点提醒我给客户发邮件\n  /remind 每5分钟提醒我喝水\n  /remind 30分钟后提醒我开会\n  /remind 每周一上午8点生成周报".to_string();
+            }
+
+            // Get the current user's default agent or use the first available
+            let agent_id = router.resolve(
+                &crate::types::ChannelType::CLI,
+                &sender.platform_id,
+                sender.openfang_user.as_deref(),
+            );
+
+            let agent_name = match agent_id {
+                Some(aid) => {
+                    // Try to find the agent name from the registry through list_agents
+                    match handle.list_agents().await {
+                        Ok(agents) => {
+                            agents.iter()
+                                .find(|(id, _)| *id == aid)
+                                .map(|(_, name)| name.clone())
+                                .unwrap_or_else(|| "default".to_string())
+                        }
+                        _ => "default".to_string(),
+                    }
+                }
+                None => {
+                    // Try to use the first available agent
+                    match handle.list_agents().await {
+                        Ok(agents) if !agents.is_empty() => agents[0].1.clone(),
+                        _ => return "No agent available. Please spawn an agent first with /agent <name>".to_string(),
+                    }
+                }
+            };
+
+            let natural_text = args.join(" ");
+
+            // First try to parse the natural language
+            match parse_reminder(&natural_text) {
+                Some(_parsed) => {
+                    // Create the reminder using the parsed data
+                    handle.create_reminder_text(&agent_name, &natural_text).await
+                }
+                None => {
+                    // Could not parse - provide helpful error
+                    format!("Could not understand the reminder format.\n\nYou said: {}\n\nSupported formats:\n\
+                    • 每X分钟/小时/天 - 每5分钟提醒我喝水\n\
+                    • 每天HH点 - 每天9点提醒我给客户发邮件\n\
+                    • 每天上午/下午H点 - 每天下午3点提醒我倒水\n\
+                    • 每周X - 每周一上午8点生成周报\n\
+                    • X分钟后/小时后 - 30分钟后提醒我开会\n\
+                    • 明天/后天H点 - 明天9点准备汇报\n\
+                    • 每小时/每分钟 - 每小时提醒我活动一下", natural_text)
+                }
             }
         }
         "approvals" => handle.list_approvals_text().await,

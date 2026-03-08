@@ -528,7 +528,7 @@ impl ChannelAdapter for BlueskyAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(&self, _user: &ChannelUser, _message_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Bluesky/AT Protocol does not support typing indicators
         Ok(())
     }

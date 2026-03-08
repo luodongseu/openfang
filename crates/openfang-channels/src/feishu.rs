@@ -34,6 +34,9 @@ const FEISHU_SEND_URL: &str = "https://open.feishu.cn/open-apis/im/v1/messages";
 /// Feishu bot info endpoint.
 const FEISHU_BOT_INFO_URL: &str = "https://open.feishu.cn/open-apis/bot/v3/info";
 
+/// Feishu message reaction endpoint.
+const FEISHU_REACTION_URL: &str = "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reactions";
+
 /// Maximum Feishu message text length (characters).
 const MAX_MESSAGE_LEN: usize = 4096;
 
@@ -342,6 +345,181 @@ impl FeishuAdapter {
             } else {
                 info!(code = code, "Feishu message sent successfully");
             }
+        }
+
+        Ok(())
+    }
+
+    /// Send an interactive card message to Feishu with markdown support.
+    async fn api_send_card_message(
+        &self,
+        receive_id: &str,
+        receive_id_type: &str,
+        text: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let token = self.get_token().await?;
+        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, receive_id_type);
+
+        info!(
+            receive_id = %receive_id,
+            text_len = text.len(),
+            "Sending Feishu card message"
+        );
+
+        // Build card content with markdown support
+        // Split long messages into multiple cards if needed
+        let chunks = split_message(text, MAX_MESSAGE_LEN);
+        
+        for (idx, chunk) in chunks.iter().enumerate() {
+            // Convert markdown to Feishu card format
+            let card_content = build_markdown_card(chunk);
+
+            let body = serde_json::json!({
+                "receive_id": receive_id,
+                "msg_type": "interactive",
+                "content": card_content.to_string(),
+            });
+
+            debug!(chunk_idx = idx, body = %body, "Sending card to Feishu");
+
+            let resp = self
+                .client
+                .post(&url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await?;
+
+            let status = resp.status();
+            let resp_body = resp.text().await.unwrap_or_default();
+            
+            debug!(status = %status, response = %resp_body, "Feishu API response");
+
+            if !status.is_success() {
+                error!(
+                    status = %status,
+                    response = %resp_body,
+                    "Feishu send card message HTTP error"
+                );
+                return Err(format!("Feishu send card message error {status}: {resp_body}").into());
+            }
+
+            let resp_json: serde_json::Value = serde_json::from_str(&resp_body).unwrap_or_default();
+            let code = resp_json["code"].as_i64().unwrap_or(-1);
+            if code != 0 {
+                let msg = resp_json["msg"].as_str().unwrap_or("unknown error");
+                error!(code = code, msg = %msg, "Feishu send card message API error");
+            } else {
+                info!(code = code, "Feishu card message sent successfully");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send a post message (rich text) to Feishu.
+    /// This is an alternative to interactive cards with better markdown support.
+    #[allow(dead_code)]
+    async fn api_send_post_message(
+        &self,
+        receive_id: &str,
+        receive_id_type: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let token = self.get_token().await?;
+        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, receive_id_type);
+
+        // Build post content with rich text formatting
+        let post_content = build_post_content(title, content);
+
+        let body = serde_json::json!({
+            "receive_id": receive_id,
+            "msg_type": "post",
+            "content": post_content,
+        });
+
+        debug!(body = %body, "Sending post message to Feishu");
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let resp_body = resp.text().await.unwrap_or_default();
+        
+        if !status.is_success() {
+            error!(
+                status = %status,
+                response = %resp_body,
+                "Feishu send post message HTTP error"
+            );
+            return Err(format!("Feishu send post message error {status}: {resp_body}").into());
+        }
+
+        let resp_json: serde_json::Value = serde_json::from_str(&resp_body).unwrap_or_default();
+        let code = resp_json["code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            let msg = resp_json["msg"].as_str().unwrap_or("unknown error");
+            error!(code = code, msg = %msg, "Feishu send post message API error");
+        }
+
+        Ok(())
+    }
+
+    /// Add a reaction (emoji) to a Feishu message.
+    async fn api_add_reaction(
+        &self,
+        message_id: &str,
+        emoji_type: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let token = self.get_token().await?;
+        let url = FEISHU_REACTION_URL.replace("{message_id}", message_id);
+
+        let body = serde_json::json!({
+            "reaction_type": emoji_type,
+        });
+
+        info!(message_id = %message_id, emoji_type = %emoji_type, "Adding Feishu reaction");
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let resp_body = resp.text().await.unwrap_or_default();
+
+        debug!(status = %status, response = %resp_body, "Feishu reaction API response");
+
+        if !status.is_success() {
+            error!(
+                status = %status,
+                response = %resp_body,
+                "Feishu add reaction HTTP error"
+            );
+            return Err(format!("Feishu add reaction error {status}: {resp_body}").into());
+        }
+
+        let resp_json: serde_json::Value = serde_json::from_str(&resp_body).unwrap_or_default();
+        let code = resp_json["code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            let msg = resp_json["msg"].as_str().unwrap_or("unknown error");
+            error!(code = code, msg = %msg, "Feishu add reaction API error");
+            // Don't return error for duplicate reaction or other non-critical errors
+            if code == 230001 {
+                // Message not found or already has reaction
+                warn!("Feishu reaction may already exist or message not found");
+            }
+        } else {
+            info!("Feishu reaction added successfully");
         }
 
         Ok(())
@@ -1016,27 +1194,406 @@ impl ChannelAdapter for FeishuAdapter {
         
         match content {
             ChannelContent::Text(text) => {
-                debug!(text_len = text.len(), "Sending text message");
-                self.api_send_message(&user.platform_id, "chat_id", &text)
+                debug!(text_len = text.len(), "Sending text message as card");
+                // Use interactive card for better markdown rendering
+                self.api_send_card_message(&user.platform_id, "chat_id", &text)
                     .await?;
             }
             _ => {
                 warn!("Unsupported content type for Feishu");
-                self.api_send_message(&user.platform_id, "chat_id", "(Unsupported content type)")
+                self.api_send_card_message(&user.platform_id, "chat_id", "(Unsupported content type)")
                     .await?;
             }
         }
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(())
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+        message_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Feishu doesn't have a native typing indicator, so we add a reaction emoji
+        // to the received message to indicate we're processing it
+        debug!(message_id = %message_id, "Adding Feishu typing reaction");
+        self.api_add_reaction(message_id, "THINKING").await
+    }
+
+    async fn send_reaction(
+        &self,
+        _user: &ChannelUser,
+        message_id: &str,
+        reaction: &crate::types::LifecycleReaction,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Map LifecycleReaction emoji to Feishu emoji type
+        let emoji_type = match reaction.phase {
+            crate::types::AgentPhase::Thinking => "THINKING",
+            crate::types::AgentPhase::ToolUse { .. } => "OK",
+            crate::types::AgentPhase::Streaming => "HEART",
+            crate::types::AgentPhase::Done => "THUMBSUP",
+            crate::types::AgentPhase::Error => "FACEPALM",
+            crate::types::AgentPhase::Queued => "EYES",
+        };
+
+        self.api_add_reaction(message_id, emoji_type).await
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+}
+
+/// Build a Feishu interactive card with rich markdown content.
+///
+/// This function converts markdown text into Feishu's card format.
+/// Uses `lark_md` tag for proper markdown rendering support.
+fn build_markdown_card(text: &str) -> serde_json::Value {
+    // Split long messages into chunks if needed
+    let chunks = split_message(text, MAX_MESSAGE_LEN);
+    let mut elements = vec![];
+
+    for chunk in chunks {
+        // Use lark_md for proper markdown rendering in interactive cards
+        elements.push(serde_json::json!({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": chunk
+            }
+        }));
+    }
+
+    // Fallback: if no elements, add a default one
+    if elements.is_empty() {
+        elements.push(serde_json::json!({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": text
+            }
+        }));
+    }
+
+    serde_json::json!({
+        "config": {
+            "wide_screen_mode": true
+        },
+        "elements": elements
+    })
+}
+
+/// Build rich text elements from markdown
+fn build_rich_elements(text: &str) -> Vec<serde_json::Value> {
+    let mut elements = vec![];
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    
+    while i < lines.len() {
+        let line = lines[i].trim_end();
+        
+        // Skip empty lines
+        if line.trim().is_empty() {
+            i += 1;
+            continue;
+        }
+        
+        // Header level 2: ## Title
+        if line.starts_with("## ") {
+            let title = line[3..].trim();
+            elements.push(serde_json::json!({
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": format!("{}", title),
+                    "style": {
+                        "bold": true,
+                        "font_size": 18,
+                        "color": "blue"
+                    }
+                },
+                "padding": "8px 0px 4px 0px"
+            }));
+            i += 1;
+            continue;
+        }
+        
+        // Header level 3: ### Title
+        if line.starts_with("### ") {
+            let title = line[4..].trim();
+            elements.push(serde_json::json!({
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": title,
+                    "style": {
+                        "bold": true,
+                        "font_size": 15
+                    }
+                },
+                "padding": "6px 0px 2px 0px"
+            }));
+            i += 1;
+            continue;
+        }
+        
+        // Divider
+        if line.trim() == "---" {
+            elements.push(serde_json::json!({
+                "tag": "hr",
+                "margin": "8px 0px"
+            }));
+            i += 1;
+            continue;
+        }
+        
+        // Code block
+        if line.trim().starts_with("```") {
+            let lang = line.trim()[3..].trim();
+            let mut code_content = vec![];
+            i += 1;
+            
+            while i < lines.len() && !lines[i].trim().starts_with("```") {
+                code_content.push(lines[i]);
+                i += 1;
+            }
+            
+            let code = code_content.join("\n");
+            elements.push(serde_json::json!({
+                "tag": "code_block",
+                "language": if lang.is_empty() { "plain" } else { lang },
+                "text": code
+            }));
+            
+            i += 1; // Skip closing ```
+            continue;
+        }
+        
+        // List items - collect consecutive list items
+        if line.trim().starts_with("- ") || line.trim().starts_with("* ") {
+            let mut items = vec![];
+            
+            while i < lines.len() {
+                let item_line = lines[i].trim_end();
+                let trimmed = item_line.trim_start();
+                
+                if trimmed.starts_with("- ") {
+                    let content = &trimmed[2..];
+                    items.push(format!("• {}", content));
+                    i += 1;
+                } else if trimmed.starts_with("* ") {
+                    let content = &trimmed[2..];
+                    items.push(format!("• {}", content));
+                    i += 1;
+                } else if item_line.trim().is_empty() {
+                    i += 1;
+                    // Continue to collect more list items after empty line
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            
+            if !items.is_empty() {
+                elements.push(serde_json::json!({
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": items.join("\n")
+                    },
+                    "padding": "2px 0px"
+                }));
+            }
+            continue;
+        }
+        
+        // Regular paragraph with inline formatting
+        let mut paragraph_lines = vec![];
+        
+        while i < lines.len() {
+            let pline = lines[i].trim_end();
+            
+            if pline.trim().is_empty() 
+                || pline.starts_with("## ")
+                || pline.starts_with("### ")
+                || pline.trim() == "---"
+                || pline.trim().starts_with("```")
+                || pline.trim().starts_with("- ")
+                || pline.trim().starts_with("* ") {
+                break;
+            }
+            
+            paragraph_lines.push(pline);
+            i += 1;
+        }
+        
+        if !paragraph_lines.is_empty() {
+            let content = paragraph_lines.join("\n");
+            // Process inline formatting
+            let processed = process_inline_styles(&content);
+            
+            elements.push(serde_json::json!({
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": processed
+                },
+                "padding": "2px 0px"
+            }));
+        }
+    }
+    
+    // Fallback: if no elements, return raw text
+    if elements.is_empty() {
+        elements.push(serde_json::json!({
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": text
+            }
+        }));
+    }
+    
+    elements
+}
+
+/// Process inline styles like **bold** and *italic*
+fn process_inline_styles(text: &str) -> String {
+    let mut result = text.to_string();
+    
+    // Note: plain_text doesn't support markdown inline styles
+    // We keep the ** and * markers as-is for visual indication
+    // or remove them for cleaner display
+    
+    // Remove ** markers but keep content
+    while let Some(start) = result.find("**") {
+        if let Some(end) = result[start+2..].find("**") {
+            let before = &result[..start];
+            let content = &result[start+2..start+2+end];
+            let after = &result[start+2+end+2..];
+            result = format!("{}{}{}", before, content, after);
+        } else {
+            break;
+        }
+    }
+    
+    result
+}
+
+/// Build post content for Feishu's post message type.
+/// Post messages support rich text formatting with better markdown support.
+fn build_post_content(title: &str, content: &str) -> String {
+    let mut post_lines: Vec<serde_json::Value> = vec![];
+    
+    for line in content.lines() {
+        let trimmed = line.trim();
+        
+        if trimmed.is_empty() {
+            continue;
+        }
+        
+        // Header level 2
+        if trimmed.starts_with("## ") {
+            let text = &trimmed[3..];
+            post_lines.push(serde_json::json!([{
+                "tag": "text",
+                "text": format!("{}\n", text),
+                "style": ["bold", "underline"]
+            }]));
+            continue;
+        }
+        
+        // Header level 3
+        if trimmed.starts_with("### ") {
+            let text = &trimmed[4..];
+            post_lines.push(serde_json::json!([{
+                "tag": "text",
+                "text": format!("{}\n", text),
+                "style": ["bold"]
+            }]));
+            continue;
+        }
+        
+        // List item
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            let text = &trimmed[2..];
+            post_lines.push(serde_json::json!([{
+                "tag": "text",
+                "text": format!("• {}\n", text)
+            }]));
+            continue;
+        }
+        
+        // Regular line with inline formatting
+        let processed = process_inline_for_post(trimmed);
+        post_lines.push(processed);
+    }
+    
+    let post_obj = serde_json::json!({
+        "zh_cn": {
+            "title": title,
+            "content": post_lines
+        }
+    });
+    
+    post_obj.to_string()
+}
+
+/// Process inline formatting for post message
+fn process_inline_for_post(line: &str) -> serde_json::Value {
+    let mut parts = vec![];
+    let mut remaining = line;
+    
+    while !remaining.is_empty() {
+        // Find bold text **text**
+        if let Some(start) = remaining.find("**") {
+            // Add text before bold
+            if start > 0 {
+                parts.push(serde_json::json!({
+                    "tag": "text",
+                    "text": &remaining[..start]
+                }));
+            }
+            
+            // Find end of bold
+            if let Some(end) = remaining[start+2..].find("**") {
+                let content = &remaining[start+2..start+2+end];
+                parts.push(serde_json::json!({
+                    "tag": "text",
+                    "text": content,
+                    "style": ["bold"]
+                }));
+                remaining = &remaining[start+2+end+2..];
+            } else {
+                // Unclosed bold, treat as regular text
+                parts.push(serde_json::json!({
+                    "tag": "text",
+                    "text": remaining
+                }));
+                break;
+            }
+        } else {
+            // No more formatting
+            parts.push(serde_json::json!({
+                "tag": "text",
+                "text": remaining
+            }));
+            break;
+        }
+    }
+    
+    // Add newline at the end
+    if let Some(last) = parts.last_mut() {
+        if let Some(obj) = last.as_object_mut() {
+            if let Some(text) = obj.get_mut("text") {
+                if let Some(s) = text.as_str() {
+                    *text = serde_json::Value::String(format!("{}\n", s));
+                }
+            }
+        }
+    }
+    
+    serde_json::Value::Array(parts)
 }
 
 #[cfg(test)]

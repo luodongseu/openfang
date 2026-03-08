@@ -6,10 +6,10 @@
 # api_listen = "127.0.0.1:50051"             # HTTP API bind address (use 0.0.0.0 for public)
 
 [default_model]
-provider = "anthropic"                    # "anthropic", "gemini", "openai", "groq", "ollama", etc.
-model = "claude-sonnet-4-20250514"        # Model identifier
-api_key_env = "ANTHROPIC_API_KEY"         # Environment variable holding API key
-# base_url = "https://api.anthropic.com"  # Optional: override API endpoint
+provider = "moonshot"                     # "moonshot", "anthropic", "gemini", "openai", "groq", "ollama", etc.
+model = "kimi-latest"                     # Model identifier
+api_key_env = "MOONSHOT_API_KEY"          # Environment variable holding API key
+# base_url = "https://api.moonshot.cn"    # Optional: override API endpoint
 
 [memory]
 decay_rate = 0.05                         # Memory confidence decay rate
@@ -44,5 +44,17 @@ listen_addr = "127.0.0.1:4200"           # OFP listen address
 # MCP server connections
 # [[mcp_servers]]
 # name = "filesystem"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# transport = { type = "stdio", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] }
+# # For SSE transport, use: transport = { type = "sse", url = "http://localhost:3000/sse" }
+
+# Auto-restart configuration for development (disabled by default)
+# [auto_restart]
+# enabled = true
+# watch_paths = ["crates", "agents"]
+# extensions = ["rs", "toml"]
+# debounce_ms = 500
+# build_command = "cargo"
+# build_args = ["build"]
+# restart_delay_secs = 1
+# max_restarts = 5
+# restart_window_secs = 60

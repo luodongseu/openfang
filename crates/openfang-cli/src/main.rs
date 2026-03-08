@@ -1214,6 +1214,7 @@ fn detect_best_provider() -> (&'static str, &'static str, &'static str) {
 /// Static list of supported providers: (id, env_var, default_model, display_name).
 fn provider_list() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
     vec![
+        ("moonshot", "MOONSHOT_API_KEY", "kimi-latest", "Moonshot (Kimi)"),
         ("groq", "GROQ_API_KEY", "llama-3.3-70b-versatile", "Groq"),
         ("gemini", "GEMINI_API_KEY", "gemini-2.5-flash", "Gemini"),
         ("deepseek", "DEEPSEEK_API_KEY", "deepseek-chat", "DeepSeek"),
@@ -1320,11 +1321,44 @@ fn cmd_start(config: Option<PathBuf>) {
         ui::hint("Press Ctrl+C to stop the daemon");
         ui::blank();
 
-        if let Err(e) =
-            openfang_api::server::run_daemon(kernel, &listen_addr, Some(&daemon_info_path)).await
-        {
-            ui::error(&format!("Daemon error: {e}"));
-            std::process::exit(1);
+        // Auto-restart loop for development workflows
+        let mut current_kernel = kernel;
+        loop {
+            match openfang_api::server::run_daemon(
+                current_kernel,
+                &listen_addr,
+                Some(&daemon_info_path),
+            )
+            .await
+            {
+                Ok(()) => {
+                    // Normal shutdown
+                    break;
+                }
+                Err(e) => {
+                    // Check if it's an auto-restart request
+                    let err_str = e.to_string();
+                    if err_str.contains("Auto-restart") {
+                        ui::info("Auto-restarting daemon...");
+                        // Give a moment for file writes to settle
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        // Boot a new kernel with updated config
+                        match OpenFangKernel::boot(config.as_deref()) {
+                            Ok(new_kernel) => {
+                                current_kernel = new_kernel;
+                                continue;
+                            }
+                            Err(e) => {
+                                ui::error(&format!("Failed to reboot kernel: {e}"));
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        ui::error(&format!("Daemon error: {e}"));
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
 
         ui::blank();

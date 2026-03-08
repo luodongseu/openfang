@@ -332,7 +332,7 @@ impl ChannelAdapter for NtfyAdapter {
         self.publish(&text, Some("OpenFang")).await
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(&self, _user: &ChannelUser, _message_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         // ntfy has no typing indicator concept.
         Ok(())
     }

@@ -77,6 +77,11 @@ pub fn hint(msg: &str) {
     println!("  {} {}", "hint:".dimmed(), msg.dimmed());
 }
 
+/// Info line: "  ℹ message" in blue.
+pub fn info(msg: &str) {
+    println!("  {} {}", "ℹ".bright_blue(), msg);
+}
+
 /// Numbered "Next steps:" list.
 pub fn next_steps(steps: &[&str]) {
     println!("  {}:", "Next steps".bold());

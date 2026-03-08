@@ -29,6 +29,14 @@ struct ProviderInfo {
 
 const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
+        name: "moonshot",
+        display: "Moonshot (Kimi)",
+        env_var: "MOONSHOT_API_KEY",
+        default_model: "kimi-latest",
+        needs_key: true,
+        hint: "",
+    },
+    ProviderInfo {
         name: "groq",
         display: "Groq",
         env_var: "GROQ_API_KEY",

@@ -230,7 +230,11 @@ pub trait ChannelAdapter: Send + Sync {
     ) -> Result<(), Box<dyn std::error::Error>>;
 
     /// Send a typing indicator (optional — default no-op).
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+        _message_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 

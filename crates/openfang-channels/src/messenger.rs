@@ -415,7 +415,7 @@ impl ChannelAdapter for MessengerAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(&self, user: &ChannelUser, _message_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.api_send_action(&user.platform_id, "typing_on").await
     }
 

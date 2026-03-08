@@ -1478,3 +1478,38 @@ Configured in agent manifests via `AutonomousConfig`:
 | `max_restarts` | `10` | Maximum automatic restarts before permanent stop. |
 | `heartbeat_interval_secs` | `30` | Seconds between heartbeat health checks. |
 | `heartbeat_channel` | `null` | Channel to send heartbeat status to (e.g., `"telegram"`). |
+
+---
+
+## Auto-Restart (Development Mode)
+
+The `[auto_restart]` section enables automatic recompilation and restart when source files change. This is useful for development workflows.
+
+```toml
+[auto_restart]
+enabled = true
+watch_paths = ["crates", "agents"]
+extensions = ["rs", "toml"]
+debounce_ms = 500
+build_command = "cargo"
+build_args = ["build", "--release"]
+restart_delay_secs = 1
+max_restarts = 5
+restart_window_secs = 60
+```
+
+### Auto-Restart Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable auto-restart on source changes. |
+| `watch_paths` | `[]` | Directories to watch for changes (relative to project root). |
+| `extensions` | `["rs", "toml"]` | File extensions to monitor. |
+| `debounce_ms` | `500` | Debounce duration in milliseconds. |
+| `build_command` | `null` | Build command (default: `"cargo"`). |
+| `build_args` | `["build"]` | Arguments for build command. |
+| `restart_delay_secs` | `1` | Delay before restart after successful build. |
+| `max_restarts` | `5` | Maximum restart attempts within window. |
+| `restart_window_secs` | `60` | Time window for counting restarts. |
+
+**Note:** Auto-restart is designed for development use. It monitors source files, runs the build command when changes are detected, and restarts the daemon if the build succeeds. To prevent restart loops, it limits restarts to `max_restarts` within `restart_window_secs`.

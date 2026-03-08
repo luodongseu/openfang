@@ -555,6 +555,123 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
+    async fn create_reminder_text(
+        &self,
+        agent_name: &str,
+        natural_text: &str,
+    ) -> String {
+        // Parse the natural language using the bridge's parser
+        use openfang_channels::bridge::parse_reminder;
+
+        let agent = match self.kernel.registry.find_by_name(agent_name) {
+            Some(e) => e,
+            None => return format!("Agent '{}' not found.", agent_name),
+        };
+
+        match parse_reminder(natural_text) {
+            Some(parsed) => {
+                // Check if this is a one-shot reminder (starts with +)
+                let (schedule, one_shot) = if parsed.cron_expr.starts_with("+") {
+                    // One-shot reminder - parse the offset
+                    if parsed.cron_expr.ends_with("m") {
+                        // Minutes offset like +30m
+                        let mins: u64 = parsed.cron_expr[1..parsed.cron_expr.len()-1]
+                            .parse()
+                            .unwrap_or(30);
+                        let at = chrono::Utc::now() + chrono::Duration::minutes(mins as i64);
+                        (
+                            openfang_types::scheduler::CronSchedule::At { at },
+                            true
+                        )
+                    } else if parsed.cron_expr.contains("d") {
+                        // Day offset like +1d0h9m (tomorrow at 9:00)
+                        let parts: Vec<&str> = parsed.cron_expr[1..].split("d").collect();
+                        let days: i64 = parts[0].parse().unwrap_or(1);
+                        let at = chrono::Utc::now()
+                            + chrono::Duration::days(days)
+                            + chrono::Duration::hours(9); // Default to 9 AM
+                        (
+                            openfang_types::scheduler::CronSchedule::At { at },
+                            true
+                        )
+                    } else {
+                        // Fallback to recurring cron
+                        (
+                            openfang_types::scheduler::CronSchedule::Cron {
+                                expr: parsed.cron_expr.clone(),
+                                tz: None,
+                            },
+                            false
+                        )
+                    }
+                } else {
+                    // Recurring cron schedule
+                    (
+                        openfang_types::scheduler::CronSchedule::Cron {
+                            expr: parsed.cron_expr.clone(),
+                            tz: None,
+                        },
+                        false
+                    )
+                };
+
+                let job_name = format!("remind-{}-{:x}",
+                    agent_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-"),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() % 10000
+                );
+
+                let job = openfang_types::scheduler::CronJob {
+                    id: openfang_types::scheduler::CronJobId::new(),
+                    agent_id: agent.id,
+                    name: job_name,
+                    enabled: true,
+                    schedule,
+                    action: openfang_types::scheduler::CronAction::AgentTurn {
+                        message: parsed.message.clone(),
+                        model_override: None,
+                        timeout_secs: Some(60),
+                    },
+                    delivery: openfang_types::scheduler::CronDelivery::LastChannel,
+                    created_at: chrono::Utc::now(),
+                    last_run: None,
+                    next_run: None,
+                };
+
+                match self.kernel.cron_scheduler.add_job(job, one_shot) {
+                    Ok(id) => {
+                        let id_short = &id.0.to_string()[..8];
+                        let one_shot_str = if one_shot { " (one-shot)" } else { "" };
+                        format!(
+                            "Reminder [{}] created{}:\n  Schedule: {}\n  Message: {}\n  Agent: {}",
+                            id_short,
+                            one_shot_str,
+                            parsed.description,
+                            parsed.message,
+                            agent_name
+                        )
+                    }
+                    Err(e) => format!("Failed to create reminder: {}", e),
+                }
+            }
+            None => {
+                format!(
+                    "Could not understand the reminder format.\n\nYou said: {}\n\nSupported formats:\n\
+                    • 每X分钟/小时/天 - 每5分钟提醒我喝水\n\
+                    • 每天HH点 - 每天9点提醒我给客户发邮件\n\
+                    • 每天上午/下午H点 - 每天下午3点提醒我倒水\n\
+                    • 每周X - 每周一上午8点生成周报\n\
+                    • X分钟后/小时后 - 30分钟后提醒我开会\n\
+                    • 明天/后天H点 - 明天9点准备汇报\n\
+                    • 每小时/每分钟 - 每小时提醒我活动一下",
+                    natural_text
+                )
+            }
+        }
+    }
+
     async fn list_approvals_text(&self) -> String {
         let pending = self.kernel.approval_manager.list_pending();
         if pending.is_empty() {

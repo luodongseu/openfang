@@ -337,6 +337,49 @@ impl Default for ReloadConfig {
     }
 }
 
+/// Auto-restart configuration for development workflows.
+///
+/// Watches source files and automatically recompiles and restarts
+/// the kernel when changes are detected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoRestartConfig {
+    /// Enable auto-restart on source changes. Default: false.
+    pub enabled: bool,
+    /// Paths to watch for changes (relative to project root).
+    pub watch_paths: Vec<PathBuf>,
+    /// File extensions to monitor. Default: ["rs", "toml"].
+    pub extensions: Vec<String>,
+    /// Debounce duration in milliseconds. Default: 500.
+    pub debounce_ms: u64,
+    /// Build command (default: "cargo").
+    pub build_command: Option<String>,
+    /// Build arguments (default: ["build"]).
+    pub build_args: Vec<String>,
+    /// Delay before restart after successful build (seconds). Default: 1.
+    pub restart_delay_secs: u64,
+    /// Maximum number of restart attempts within window. Default: 5.
+    pub max_restarts: u32,
+    /// Time window for max restarts (seconds). Default: 60.
+    pub restart_window_secs: u64,
+}
+
+impl Default for AutoRestartConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            watch_paths: vec![],
+            extensions: vec!["rs".to_string(), "toml".to_string()],
+            debounce_ms: 500,
+            build_command: None,
+            build_args: vec!["build".to_string()],
+            restart_delay_secs: 1,
+            max_restarts: 5,
+            restart_window_secs: 60,
+        }
+    }
+}
+
 /// Webhook trigger authentication configuration.
 ///
 /// Controls the `/hooks/wake` and `/hooks/agent` endpoints for external
@@ -1046,6 +1089,9 @@ pub struct KernelConfig {
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
+    /// Auto-restart configuration for development workflows.
+    #[serde(default)]
+    pub auto_restart: AutoRestartConfig,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1213,6 +1259,7 @@ impl Default for KernelConfig {
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
             oauth: OAuthConfig::default(),
+            auto_restart: AutoRestartConfig::default(),
         }
     }
 }
@@ -1331,9 +1378,9 @@ pub struct DefaultModelConfig {
 impl Default for DefaultModelConfig {
     fn default() -> Self {
         Self {
-            provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            provider: "moonshot".to_string(),
+            model: "kimi-latest".to_string(),
+            api_key_env: "MOONSHOT_API_KEY".to_string(),
             base_url: None,
         }
     }

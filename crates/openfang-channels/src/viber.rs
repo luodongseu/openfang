@@ -415,7 +415,11 @@ impl ChannelAdapter for ViberAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+        _message_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Viber does not support typing indicators via REST API
         Ok(())
     }

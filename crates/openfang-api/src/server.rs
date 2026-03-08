@@ -671,6 +671,59 @@ pub async fn run_daemon(
         });
     }
 
+    // Auto-restart file watcher for development workflows
+    let restart_notify = Arc::new(tokio::sync::Notify::new());
+    let _file_watcher_handle = if kernel.config.auto_restart.enabled {
+        let auto_restart_config = kernel.config.auto_restart.clone();
+        let restart_signal = restart_notify.clone();
+        
+        // Resolve watch paths relative to current directory or project root
+        let watch_paths: Vec<std::path::PathBuf> = auto_restart_config
+            .watch_paths
+            .iter()
+            .map(|p| {
+                if p.is_absolute() {
+                    p.clone()
+                } else {
+                    std::env::current_dir().unwrap_or_default().join(p)
+                }
+            })
+            .filter(|p| p.exists())
+            .collect();
+        
+        if watch_paths.is_empty() {
+            tracing::warn!("Auto-restart enabled but no valid watch paths configured");
+            None
+        } else {
+            tracing::info!(
+                "Auto-restart enabled, watching paths: {:?}",
+                watch_paths
+            );
+            
+            let config = openfang_kernel::file_watcher::AutoRestartConfig {
+                enabled: true,
+                watch_paths,
+                extensions: auto_restart_config.extensions,
+                debounce_ms: auto_restart_config.debounce_ms,
+                build_command: auto_restart_config.build_command,
+                build_args: auto_restart_config.build_args,
+                restart_delay_secs: auto_restart_config.restart_delay_secs,
+                max_restarts: auto_restart_config.max_restarts,
+                restart_window_secs: auto_restart_config.restart_window_secs,
+            };
+            
+            match openfang_kernel::file_watcher::start_auto_restart(config, restart_signal).await {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    tracing::error!("Failed to start auto-restart watcher: {}", e);
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+
     let (app, state) = build_router(kernel.clone(), addr).await;
 
     // Write daemon info file
@@ -716,12 +769,21 @@ pub async fn run_daemon(
     // SECURITY: `into_make_service_with_connect_info` injects the peer
     // SocketAddr so the auth middleware can check for loopback connections.
     let api_shutdown = state.shutdown_notify.clone();
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal(api_shutdown))
-    .await?;
+    
+    // Determine if we should restart after shutdown
+    let restart_notify2 = restart_notify.clone();
+    let should_restart = tokio::select! {
+        _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal(api_shutdown, restart_notify))
+        => false,
+        _ = restart_notify2.notified() => {
+            info!("Auto-restart triggered by file watcher");
+            true
+        }
+    };
 
     // Clean up daemon info file
     if let Some(info_path) = daemon_info_path {
@@ -735,6 +797,12 @@ pub async fn run_daemon(
 
     // Shutdown kernel
     kernel.shutdown();
+
+    if should_restart {
+        info!("OpenFang daemon restarting for auto-reload...");
+        // Return a special error that indicates restart is needed
+        return Err(AutoRestartError.into());
+    }
 
     info!("OpenFang daemon stopped");
     Ok(())
@@ -758,11 +826,26 @@ pub fn read_daemon_info(home_dir: &Path) -> Option<DaemonInfo> {
     serde_json::from_str(&contents).ok()
 }
 
+/// Error type indicating the daemon should auto-restart.
+#[derive(Debug)]
+pub struct AutoRestartError;
+
+impl std::fmt::Display for AutoRestartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Auto-restart requested")
+    }
+}
+
+impl std::error::Error for AutoRestartError {}
+
 /// Wait for an OS termination signal OR an API shutdown request.
 ///
 /// On Unix: listens for SIGINT, SIGTERM, and API notify.
 /// On Windows: listens for Ctrl+C and API notify.
-async fn shutdown_signal(api_shutdown: Arc<tokio::sync::Notify>) {
+async fn shutdown_signal(
+    api_shutdown: Arc<tokio::sync::Notify>,
+    _restart_notify: Arc<tokio::sync::Notify>,
+) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};

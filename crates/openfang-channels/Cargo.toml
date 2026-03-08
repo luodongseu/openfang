@@ -32,6 +32,7 @@ imap = { workspace = true }
 native-tls = { workspace = true }
 mailparse = { workspace = true }
 prost = { workspace = true }
+regex-lite = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

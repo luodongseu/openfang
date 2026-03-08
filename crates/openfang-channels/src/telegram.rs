@@ -293,7 +293,7 @@ impl ChannelAdapter for TelegramAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(&self, user: &ChannelUser, _message_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         let chat_id: i64 = user
             .platform_id
             .parse()

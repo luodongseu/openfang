@@ -441,7 +441,11 @@ impl ChannelAdapter for KeybaseAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+        _message_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Keybase does not expose a typing indicator via the JSON API
         Ok(())
     }

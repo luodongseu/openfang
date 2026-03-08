@@ -291,7 +291,11 @@ impl ChannelAdapter for MatrixAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+        _message_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let url = format!(
             "{}/_matrix/client/v3/rooms/{}/typing/{}",
             self.homeserver_url, user.platform_id, self.user_id

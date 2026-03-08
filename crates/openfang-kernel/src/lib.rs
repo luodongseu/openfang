@@ -13,6 +13,7 @@ pub mod config_reload;
 pub mod cron;
 pub mod error;
 pub mod event_bus;
+pub mod file_watcher;
 pub mod heartbeat;
 pub mod kernel;
 pub mod metering;
