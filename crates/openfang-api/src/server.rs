@@ -513,6 +513,27 @@ pub async fn build_router(
             "/api/scheduler/jobs/{id}/history",
             axum::routing::get(routes::scheduler_job_history),
         )
+        // Namespace API endpoints (multi-tenant account management)
+        .route(
+            "/api/namespaces",
+            axum::routing::get(routes::namespace_list).post(routes::namespace_create),
+        )
+        .route(
+            "/api/namespaces/{id}",
+            axum::routing::get(routes::namespace_get).delete(routes::namespace_delete),
+        )
+        .route(
+            "/api/namespaces/{id}/quota",
+            axum::routing::get(routes::namespace_quota),
+        )
+        .route(
+            "/api/namespaces/{id}/routes",
+            axum::routing::get(routes::namespace_routes_list).post(routes::namespace_route_create),
+        )
+        .route(
+            "/api/namespaces/{id}/routes/{binding_id}",
+            axum::routing::delete(routes::namespace_route_delete),
+        )
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))

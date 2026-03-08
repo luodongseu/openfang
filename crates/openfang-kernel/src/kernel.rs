@@ -119,6 +119,10 @@ pub struct OpenFangKernel {
     pub hooks: openfang_runtime::hooks::HookRegistry,
     /// Persistent process manager for interactive sessions (REPLs, servers).
     pub process_manager: Arc<openfang_runtime::process_manager::ProcessManager>,
+    /// Namespace manager for multi-tenant account management.
+    pub namespace_manager: tokio::sync::RwLock<Option<Arc<openfang_namespace::NamespaceRegistry>>>,
+    /// Scheduler engine for job scheduling.
+    pub scheduler_engine: tokio::sync::Mutex<Option<Arc<openfang_scheduler::SchedulerEngine>>>,
     /// OFP peer registry — tracks connected peers.
     pub peer_registry: Option<openfang_wire::PeerRegistry>,
     /// OFP peer node — the local networking node.
@@ -872,6 +876,8 @@ impl OpenFangKernel {
             auto_reply_engine,
             hooks: openfang_runtime::hooks::HookRegistry::new(),
             process_manager: Arc::new(openfang_runtime::process_manager::ProcessManager::new(5)),
+            namespace_manager: tokio::sync::RwLock::new(None),
+            scheduler_engine: tokio::sync::Mutex::new(None),
             peer_registry: None,
             peer_node: None,
             booted_at: std::time::Instant::now(),

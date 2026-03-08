@@ -34,7 +34,7 @@ pub struct AppState {
     /// Notify handle to trigger graceful HTTP server shutdown from the API.
     pub shutdown_notify: Arc<tokio::sync::Notify>,
     /// Scheduler engine for job scheduling (initialized on first use)
-    pub scheduler: tokio::sync::RwLock<Option<Arc<dyn openfang_scheduler::Scheduler>>>,
+    pub scheduler: tokio::sync::RwLock<Option<Arc<openfang_scheduler::SchedulerEngine>>>,
 }
 
 /// POST /api/agents — Spawn a new agent.
@@ -9016,6 +9016,365 @@ pub async fn scheduler_job_history(
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+// =============================================================================
+// Namespace API (Multi-tenant account management)
+// =============================================================================
+
+use openfang_namespace::{Namespace, NamespaceConfig, NamespaceManager, ResourceQuota, RouteBinding, RouteMatcher, RouteTarget};
+
+/// GET /api/namespaces - List all namespaces
+pub async fn namespace_list(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let ns_manager = match state.kernel.namespace_manager.read().await.as_ref() {
+        Some(nm) => nm.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Namespace manager not initialized"})),
+            );
+        }
+    };
+
+    match ns_manager.list_namespaces().await {
+        Ok(namespaces) => {
+            let list: Vec<serde_json::Value> = namespaces
+                .into_iter()
+                .map(|ns| serde_json::json!({
+                    "id": ns.id,
+                    "display_name": ns.display_name,
+                    "created_at": ns.created_at,
+                    "quota": ns.quota,
+                }))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"namespaces": list, "total": list.len()})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// POST /api/namespaces - Create a new namespace
+#[derive(serde::Deserialize)]
+pub struct CreateNamespaceRequest {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub quota: Option<ResourceQuotaRequest>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ResourceQuotaRequest {
+    pub max_agents: Option<u32>,
+    pub max_concurrent_executions: Option<u32>,
+    pub max_executions_per_minute: Option<u32>,
+    pub storage_limit_mb: Option<u64>,
+    pub daily_token_limit: Option<u64>,
+    pub monthly_budget_cents: Option<u64>,
+}
+
+pub async fn namespace_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateNamespaceRequest>,
+) -> impl IntoResponse {
+    let ns_manager = match state.kernel.namespace_manager.read().await.as_ref() {
+        Some(nm) => nm.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Namespace manager not initialized"})),
+            );
+        }
+    };
+
+    match ns_manager.create_namespace(&req.id, &req.display_name).await {
+        Ok(mut created) => {
+            // Apply custom quota if provided
+            if let Some(quota_req) = req.quota {
+                let quota = ResourceQuota {
+                    max_agents: quota_req.max_agents.unwrap_or(10),
+                    max_concurrent_executions: quota_req.max_concurrent_executions.unwrap_or(5),
+                    max_executions_per_minute: quota_req.max_executions_per_minute.unwrap_or(60),
+                    storage_limit_mb: quota_req.storage_limit_mb.unwrap_or(100),
+                    daily_token_limit: quota_req.daily_token_limit.unwrap_or(1_000_000),
+                    monthly_budget_cents: quota_req.monthly_budget_cents.unwrap_or(10_000),
+                    custom_limits: Default::default(),
+                };
+                created = created.with_quota(quota);
+
+                // Update with new quota
+                if let Err(e) = ns_manager.update_namespace(created.clone()).await {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": format!("{}", e)})),
+                    );
+                }
+            }
+
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "id": created.id,
+                    "display_name": created.display_name,
+                    "created_at": created.created_at,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// GET /api/namespaces/{id} - Get namespace details
+pub async fn namespace_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let ns_manager = match state.kernel.namespace_manager.read().await.as_ref() {
+        Some(nm) => nm.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Namespace manager not initialized"})),
+            );
+        }
+    };
+
+    match ns_manager.get_namespace(&id).await {
+        Ok(Some(ns)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": ns.id,
+                "display_name": ns.display_name,
+                "config": ns.config,
+                "quota": ns.quota,
+                "created_at": ns.created_at,
+                "updated_at": ns.updated_at,
+                "metadata": ns.metadata,
+            })),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Namespace not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// DELETE /api/namespaces/{id} - Delete a namespace
+pub async fn namespace_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let ns_manager = match state.kernel.namespace_manager.read().await.as_ref() {
+        Some(nm) => nm.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Namespace manager not initialized"})),
+            );
+        }
+    };
+
+    match ns_manager.delete_namespace(&id).await {
+        Ok(()) => (
+            StatusCode::NO_CONTENT,
+            Json(serde_json::json!({})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// GET /api/namespaces/{id}/quota - Get namespace quota status
+pub async fn namespace_quota(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let ns_manager = match state.kernel.namespace_manager.read().await.as_ref() {
+        Some(nm) => nm.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Namespace manager not initialized"})),
+            );
+        }
+    };
+
+    match ns_manager.get_namespace(&id).await {
+        Ok(Some(ns)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "namespace_id": ns.id,
+                "quota": ns.quota,
+            })),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Namespace not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// GET /api/namespaces/{id}/routes - Get namespace route bindings
+pub async fn namespace_routes_list(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let ns_manager = match state.kernel.namespace_manager.read().await.as_ref() {
+        Some(nm) => nm.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Namespace manager not initialized"})),
+            );
+        }
+    };
+
+    match ns_manager.get_route_bindings(&id).await {
+        Ok(bindings) => {
+            let list: Vec<serde_json::Value> = bindings
+                .into_iter()
+                .map(|b| serde_json::json!({
+                    "id": b.id,
+                    "priority": b.priority,
+                    "matcher": b.matcher,
+                    "target": b.target,
+                    "enabled": b.enabled,
+                }))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"routes": list, "total": list.len()})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// POST /api/namespaces/{id}/routes - Add a route binding
+#[derive(serde::Deserialize)]
+pub struct CreateRouteRequest {
+    pub priority: u32,
+    pub matcher: RouteMatcherRequest,
+    pub target: RouteTargetRequest,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RouteMatcherRequest {
+    Exact { channel: String, account_id: Option<String>, peer_id: Option<String> },
+    Pattern { channel: String, account_pattern: Option<String>, peer_pattern: Option<String> },
+    Wildcard { channel: Option<String> },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RouteTargetRequest {
+    Agent { agent_id: String },
+    Hand { hand_id: String },
+    Workflow { workflow_id: String },
+    Channel { channel: String, account_id: String },
+}
+
+pub async fn namespace_route_create(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateRouteRequest>,
+) -> impl IntoResponse {
+    let ns_manager = match state.kernel.namespace_manager.read().await.as_ref() {
+        Some(nm) => nm.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Namespace manager not initialized"})),
+            );
+        }
+    };
+
+    // Convert matcher
+    let matcher = match req.matcher {
+        RouteMatcherRequest::Exact { channel, account_id, peer_id } => {
+            RouteMatcher::Exact { channel, account_id, peer_id }
+        }
+        RouteMatcherRequest::Pattern { channel, account_pattern, peer_pattern } => {
+            RouteMatcher::Pattern { channel, account_pattern, peer_pattern }
+        }
+        RouteMatcherRequest::Wildcard { channel } => {
+            RouteMatcher::Wildcard { channel }
+        }
+    };
+
+    // Convert target
+    let target = match req.target {
+        RouteTargetRequest::Agent { agent_id } => RouteTarget::Agent { agent_id },
+        RouteTargetRequest::Hand { hand_id } => RouteTarget::Hand { hand_id },
+        RouteTargetRequest::Workflow { workflow_id } => RouteTarget::Workflow { workflow_id },
+        RouteTargetRequest::Channel { channel, account_id } => RouteTarget::Channel { channel, account_id },
+    };
+
+    let binding = RouteBinding::new(req.priority, matcher, target);
+
+    match ns_manager.add_route_binding(&id, binding).await {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"message": "Route binding created"})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{}", e)})),
+        ),
+    }
+}
+
+/// DELETE /api/namespaces/{id}/routes/{binding_id} - Remove a route binding
+pub async fn namespace_route_delete(
+    State(state): State<Arc<AppState>>,
+    Path((id, binding_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let ns_manager = match state.kernel.namespace_manager.read().await.as_ref() {
+        Some(nm) => nm.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Namespace manager not initialized"})),
+            );
+        }
+    };
+
+    match ns_manager.remove_route_binding(&id, &binding_id).await {
+        Ok(()) => (
+            StatusCode::NO_CONTENT,
+            Json(serde_json::json!({})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("{}", e)})),
         ),
     }
