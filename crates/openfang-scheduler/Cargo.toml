@@ -1,0 +1,27 @@
+[package]
+name = "openfang-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Job scheduler for OpenFang Agent OS"
+
+[dependencies]
+openfang-types = { path = "../openfang-types" }
+openfang-memory = { path = "../openfang-memory" }
+tokio = { workspace = true }
+tokio-cron-scheduler = "0.13"
+cron = "0.15"
+chrono = { workspace = true }
+chrono-tz = "0.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
